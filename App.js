@@ -379,8 +379,13 @@ export default function App() {
         roomName={roomName}
         setRoomName={setRoomName}
         getRooms={getRooms}
+        onSocial={() => setScreen("social")}
       />
     );
+  }
+
+  if (screen === "social") {
+    return <SocialScreen token={token} onBack={() => setScreen("rooms")} onOpen={openRoom} />;
   }
 
   return (
@@ -513,6 +518,7 @@ function RoomsScreen({
   roomName,
   setRoomName,
   getRooms,
+  onSocial,
 }) {
   const [rooms, setRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(true);
@@ -542,6 +548,10 @@ function RoomsScreen({
           <Text style={styles.link}>Log out</Text>
         </Pressable>
       </View>
+
+      <Pressable style={styles.createBox} onPress={onSocial}>
+        <Text style={styles.buttonText}>Discover people, requests & feed</Text>
+      </Pressable>
 
       <View style={styles.createBox}>
         <TextInput
@@ -592,6 +602,33 @@ function RoomsScreen({
       )}
     </SafeAreaView>
   );
+}
+
+function SocialScreen({ token, onBack, onOpen }) {
+  const [query, setQuery] = useState("");
+  const [people, setPeople] = useState([]);
+  const [incoming, setIncoming] = useState([]);
+  const [posts, setPosts] = useState([]);
+  const [text, setText] = useState("");
+  const headers = { Authorization: `Bearer ${token}` };
+  const load = async () => {
+    const [requests, feed] = await Promise.all([api("/api/friends/requests", { headers }), api("/api/posts", { headers })]);
+    setIncoming((await requests.json()).incoming || []);
+    setPosts((await feed.json()).posts || []);
+  };
+  useEffect(() => { load().catch(() => Alert.alert("Could not load", "Check the deployed API.")); }, []);
+  async function findPeople() { const r = await api(`/api/users/search?q=${encodeURIComponent(query)}`, { headers }); setPeople((await r.json()).users || []); }
+  async function request(username) { const r = await api("/api/friends/requests", { method: "POST", headers, body: JSON.stringify({ username }) }); const d = await r.json(); if (!r.ok) return Alert.alert("Request", d.error); Alert.alert("Request sent", `Sent to @${username}`); }
+  async function accept(requestId) { const r = await api(`/api/friends/requests/${requestId}/accept`, { method: "POST", headers }); const d = await r.json(); if (!r.ok) return Alert.alert("Could not accept", d.error); onOpen(d.room); }
+  async function publish() { const r = await api("/api/posts", { method: "POST", headers, body: JSON.stringify({ text }) }); const d = await r.json(); if (!r.ok) return Alert.alert("Could not post", d.error); setText(""); setPosts(old => [d.post, ...old]); }
+  return <SafeAreaView style={styles.container}>
+    <View style={styles.header}><Pressable onPress={onBack}><Text style={styles.back}>‹</Text></Pressable><Text style={[styles.titleSmall, { flex: 1 }]}>Your circle</Text></View>
+    <View style={styles.createBox}><TextInput style={styles.inputInline} value={query} onChangeText={setQuery} placeholder="Find a username" placeholderTextColor="#737b94" autoCapitalize="none" /><Pressable style={styles.smallButton} onPress={findPeople}><Text style={styles.buttonText}>Find</Text></Pressable></View>
+    {people.map(person => <View key={person.id} style={styles.roomCard}><View style={{ flex: 1 }}><Text style={styles.roomTitle}>{person.name}</Text><Text style={styles.roomInfo}>@{person.username}</Text></View><Pressable style={styles.smallButton} onPress={() => request(person.username)}><Text style={styles.buttonText}>{person.connected ? "Friends" : "Request"}</Text></Pressable></View>)}
+    {incoming.map(item => <View key={item.id} style={styles.roomCard}><Text style={[styles.messageText, { flex: 1 }]}>@{item.from?.username} wants to connect</Text><Pressable style={styles.smallButton} onPress={() => accept(item.id)}><Text style={styles.buttonText}>Accept</Text></Pressable></View>)}
+    <View style={styles.createBox}><TextInput style={styles.inputInline} value={text} onChangeText={setText} placeholder="Share an update…" placeholderTextColor="#737b94" multiline /><Pressable style={styles.smallButton} onPress={publish}><Text style={styles.buttonText}>Post</Text></Pressable></View>
+    <FlatList data={posts} keyExtractor={item => item.id} contentContainerStyle={{ padding: 16 }} renderItem={({ item }) => <View style={styles.message}><Text style={styles.messageUser}>{item.userName}</Text><Text style={styles.messageText}>{item.text}</Text><Text style={styles.time}>{new Date(item.createdAt).toLocaleString()}</Text></View>} ListEmptyComponent={<Text style={styles.empty}>Friends’ posts will appear here.</Text>} />
+  </SafeAreaView>;
 }
 
 const styles = StyleSheet.create({
