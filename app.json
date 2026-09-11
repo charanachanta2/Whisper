@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "Music Chat",
+    "slug": "music-chat",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-image-picker",
+      "expo-document-picker"
+    ]
+  }
+}
