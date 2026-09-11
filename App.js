@@ -41,6 +41,14 @@ function api(path, options = {}) {
   });
 }
 
+// Colorful, deterministic avatar background so names/rooms feel distinct.
+const AVATAR_COLORS = ["#6c5ce7", "#00b894", "#0984e3", "#e17055", "#d63031", "#00cec9", "#fdcb6e", "#e84393"];
+function colorFor(text = "") {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = text.charCodeAt(i) + ((hash << 5) - hash);
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+
 export default function App() {
   const [screen, setScreen] = useState("auth");
   const [authMode, setAuthMode] = useState("login");
@@ -54,6 +62,7 @@ export default function App() {
 
   const [roomId, setRoomId] = useState("");
   const [roomName, setRoomName] = useState("");
+  const [activeRoomName, setActiveRoomName] = useState("");
   const [roomMembers, setRoomMembers] = useState([]);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
@@ -127,6 +136,26 @@ export default function App() {
     };
   }, [token, roomId]);
 
+  // Wraps api() with the auth header and detects an expired/invalid session
+  // (the server replies 401 "Unauthorized" / "User not found" once a token
+  // no longer matches a real account). Instead of leaving the app stuck
+  // showing that error everywhere, we sign the device out cleanly so the
+  // person can log back in.
+  async function authedApi(path, options = {}) {
+    const res = await api(path, {
+      ...options,
+      headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+    });
+    if (res.status === 401) {
+      await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
+      setToken(null);
+      setMe(null);
+      setScreen("auth");
+      Alert.alert("Session expired", "Please sign in again.");
+    }
+    return res;
+  }
+
   async function loginOrRegister() {
     if (!username.trim() || !password) {
       return Alert.alert(
@@ -183,13 +212,13 @@ export default function App() {
 
   async function createRoom() {
     try {
-      const res = await api("/api/rooms", {
+      const res = await authedApi("/api/rooms", {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name: roomName.trim() || "New chat" }),
       });
+      if (res.status === 401) return;
       const data = await res.json();
-      if (!res.ok) return Alert.alert("Could not create chat", data.error);
+      if (!res.ok) return Alert.alert("Could not create chat", data.error || "Something went wrong.");
       setRoomName("");
       openRoom(data.room);
     } catch (_) {
@@ -198,15 +227,15 @@ export default function App() {
   }
 
   async function getRooms() {
-    const res = await api("/api/rooms", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await authedApi("/api/rooms");
+    if (res.status === 401) return [];
     const data = await res.json();
     return data.rooms || [];
   }
 
   async function openRoom(room) {
     setRoomId(room.id);
+    setActiveRoomName(room.name || "Chat");
     setScreen("chat");
   }
 
@@ -347,7 +376,10 @@ export default function App() {
           secureTextEntry
         />
 
-        <Pressable style={styles.button} onPress={loginOrRegister}>
+        <Pressable
+          style={({ pressed }) => [styles.button, pressed && { opacity: 0.85 }]}
+          onPress={loginOrRegister}
+        >
           <Text style={styles.buttonText}>
             {authMode === "login" ? "Sign in" : "Create account"}
           </Text>
@@ -385,7 +417,20 @@ export default function App() {
   }
 
   if (screen === "social") {
-    return <SocialScreen token={token} onBack={() => setScreen("rooms")} onOpen={openRoom} />;
+    return (
+      <SocialScreen
+        token={token}
+        onBack={() => setScreen("rooms")}
+        onOpen={openRoom}
+        onExpired={async () => {
+          await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
+          setToken(null);
+          setMe(null);
+          setScreen("auth");
+          Alert.alert("Session expired", "Please sign in again.");
+        }}
+      />
+    );
   }
 
   return (
@@ -394,15 +439,19 @@ export default function App() {
         <Pressable
           onPress={() => {
             setRoomId("");
+            setActiveRoomName("");
             setScreen("rooms");
           }}
         >
           <Text style={styles.back}>‹</Text>
         </Pressable>
+        <View style={[styles.avatarSm, { backgroundColor: colorFor(activeRoomName || "C") }]}>
+          <Text style={styles.avatarText}>{(activeRoomName || "C")[0].toUpperCase()}</Text>
+        </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.titleSmall}>{roomId}</Text>
+          <Text style={styles.titleSmall}>{activeRoomName || "Chat"}</Text>
           <Text style={styles.roomInfo}>
-            {roomMembers.length} online/member(s)
+            {roomMembers.length} member{roomMembers.length === 1 ? "" : "s"}
           </Text>
         </View>
         <Text style={styles.live}>● LIVE</Text>
@@ -432,7 +481,14 @@ export default function App() {
           <View
             style={[styles.message, item.userId === me?.id && styles.myMessage]}
           >
-            <Text style={styles.messageUser}>{item.userName}</Text>
+            {item.userId !== me?.id && (
+              <View style={styles.postHeader}>
+                <View style={[styles.avatarXs, { backgroundColor: colorFor(item.userName) }]}>
+                  <Text style={styles.avatarTextXs}>{item.userName[0].toUpperCase()}</Text>
+                </View>
+                <Text style={styles.messageUser}>{item.userName}</Text>
+              </View>
+            )}
             {item.type === "music" ? (
               <Pressable onPress={() => Linking.openURL(item.url)}>
                 <Text style={styles.musicShare}>
@@ -580,8 +636,11 @@ function RoomsScreen({
           keyExtractor={(r) => r.id}
           contentContainerStyle={{ padding: 16 }}
           renderItem={({ item }) => (
-            <Pressable style={styles.roomCard} onPress={() => onOpen(item)}>
-              <View style={styles.avatar}>
+            <Pressable
+              style={({ pressed }) => [styles.roomCard, pressed && { opacity: 0.8 }]}
+              onPress={() => onOpen(item)}
+            >
+              <View style={[styles.avatar, { backgroundColor: colorFor(item.name || "C") }]}>
                 <Text style={styles.avatarText}>
                   {(item.name || "C")[0].toUpperCase()}
                 </Text>
@@ -604,30 +663,124 @@ function RoomsScreen({
   );
 }
 
-function SocialScreen({ token, onBack, onOpen }) {
+function SocialScreen({ token, onBack, onOpen, onExpired }) {
   const [query, setQuery] = useState("");
   const [people, setPeople] = useState([]);
   const [incoming, setIncoming] = useState([]);
   const [posts, setPosts] = useState([]);
   const [text, setText] = useState("");
+  const [sentTo, setSentTo] = useState({});
+  const [busy, setBusy] = useState(false);
   const headers = { Authorization: `Bearer ${token}` };
+
+  async function guarded(res) {
+    if (res.status === 401) { onExpired(); return null; }
+    return res;
+  }
+
   const load = async () => {
-    const [requests, feed] = await Promise.all([api("/api/friends/requests", { headers }), api("/api/posts", { headers })]);
+    const requests = await guarded(await api("/api/friends/requests", { headers }));
+    if (!requests) return;
+    const feed = await guarded(await api("/api/posts", { headers }));
+    if (!feed) return;
     setIncoming((await requests.json()).incoming || []);
     setPosts((await feed.json()).posts || []);
   };
-  useEffect(() => { load().catch(() => Alert.alert("Could not load", "Check the deployed API.")); }, []);
-  async function findPeople() { const r = await api(`/api/users/search?q=${encodeURIComponent(query)}`, { headers }); setPeople((await r.json()).users || []); }
-  async function request(person) { const r = await api("/api/friends/requests", { method: "POST", headers, body: JSON.stringify({ userId: person.id, username: person.username }) }); const d = await r.json(); if (!r.ok) return Alert.alert("Request", d.error); Alert.alert("Request sent", `Sent to @${person.username}`); }
-  async function accept(requestId) { const r = await api(`/api/friends/requests/${requestId}/accept`, { method: "POST", headers }); const d = await r.json(); if (!r.ok) return Alert.alert("Could not accept", d.error); onOpen(d.room); }
-  async function publish() { const r = await api("/api/posts", { method: "POST", headers, body: JSON.stringify({ text }) }); const d = await r.json(); if (!r.ok) return Alert.alert("Could not post", d.error); setText(""); setPosts(old => [d.post, ...old]); }
+  useEffect(() => { load().catch(() => Alert.alert("Could not load", "Check that the backend is reachable.")); }, []);
+
+  async function findPeople() {
+    if (!query.trim()) return;
+    const r = await guarded(await api(`/api/users/search?q=${encodeURIComponent(query.trim())}`, { headers }));
+    if (!r) return;
+    setPeople((await r.json()).users || []);
+  }
+  async function request(person) {
+    const r = await guarded(await api("/api/friends/requests", { method: "POST", headers, body: JSON.stringify({ userId: person.id, username: person.username }) }));
+    if (!r) return;
+    const d = await r.json();
+    if (!r.ok) return Alert.alert("Couldn't send request", d.error || "Something went wrong.");
+    setSentTo(old => ({ ...old, [person.id]: true }));
+  }
+  async function accept(requestId) {
+    const r = await guarded(await api(`/api/friends/requests/${requestId}/accept`, { method: "POST", headers }));
+    if (!r) return;
+    const d = await r.json();
+    if (!r.ok) return Alert.alert("Couldn't accept", d.error || "Something went wrong.");
+    setIncoming(old => old.filter(i => i.id !== requestId));
+    onOpen(d.room);
+  }
+  async function publish() {
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    try {
+      const r = await guarded(await api("/api/posts", { method: "POST", headers, body: JSON.stringify({ text: text.trim() }) }));
+      if (!r) return;
+      const d = await r.json();
+      if (!r.ok) return Alert.alert("Couldn't post", d.error || "Something went wrong.");
+      setText("");
+      setPosts(old => [d.post, ...old]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <SafeAreaView style={styles.container}>
-    <View style={styles.header}><Pressable onPress={onBack}><Text style={styles.back}>‹</Text></Pressable><Text style={[styles.titleSmall, { flex: 1 }]}>Your circle</Text></View>
-    <View style={styles.createBox}><TextInput style={styles.inputInline} value={query} onChangeText={setQuery} placeholder="Find a username" placeholderTextColor="#737b94" autoCapitalize="none" /><Pressable style={styles.smallButton} onPress={findPeople}><Text style={styles.buttonText}>Find</Text></Pressable></View>
-    {people.map(person => <View key={person.id} style={styles.roomCard}><View style={{ flex: 1 }}><Text style={styles.roomTitle}>{person.name}</Text><Text style={styles.roomInfo}>@{person.username}</Text></View><Pressable style={styles.smallButton} onPress={() => request(person)}><Text style={styles.buttonText}>{person.connected ? "Friends" : "Request"}</Text></Pressable></View>)}
-    {incoming.map(item => <View key={item.id} style={styles.roomCard}><Text style={[styles.messageText, { flex: 1 }]}>@{item.from?.username} wants to connect</Text><Pressable style={styles.smallButton} onPress={() => accept(item.id)}><Text style={styles.buttonText}>Accept</Text></Pressable></View>)}
-    <View style={styles.createBox}><TextInput style={styles.inputInline} value={text} onChangeText={setText} placeholder="Share an update…" placeholderTextColor="#737b94" multiline /><Pressable style={styles.smallButton} onPress={publish}><Text style={styles.buttonText}>Post</Text></Pressable></View>
-    <FlatList data={posts} keyExtractor={item => item.id} contentContainerStyle={{ padding: 16 }} renderItem={({ item }) => <View style={styles.message}><Text style={styles.messageUser}>{item.userName}</Text><Text style={styles.messageText}>{item.text}</Text><Text style={styles.time}>{new Date(item.createdAt).toLocaleString()}</Text></View>} ListEmptyComponent={<Text style={styles.empty}>Friends’ posts will appear here.</Text>} />
+    <View style={styles.header}>
+      <Pressable onPress={onBack} hitSlop={10}><Text style={styles.back}>‹</Text></Pressable>
+      <Text style={[styles.titleSmall, { flex: 1 }]}>Your circle</Text>
+    </View>
+    <FlatList
+      contentContainerStyle={{ padding: 16, paddingTop: 0 }}
+      ListHeaderComponent={
+        <>
+          <View style={styles.searchBox}>
+            <TextInput style={styles.inputInline} value={query} onChangeText={setQuery} placeholder="Find a username" placeholderTextColor="#737b94" autoCapitalize="none" onSubmitEditing={findPeople} returnKeyType="search" />
+            <Pressable style={styles.smallButton} onPress={findPeople}><Text style={styles.buttonText}>Find</Text></Pressable>
+          </View>
+          {people.map(person => (
+            <View key={person.id} style={styles.roomCard}>
+              <View style={[styles.avatar, { backgroundColor: colorFor(person.username) }]}><Text style={styles.avatarText}>{person.name[0].toUpperCase()}</Text></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.roomTitle}>{person.name}</Text>
+                <Text style={styles.roomInfo}>@{person.username}</Text>
+              </View>
+              <Pressable style={[styles.smallButton, (person.connected || sentTo[person.id]) && styles.smallButtonMuted]} disabled={person.connected || sentTo[person.id]} onPress={() => request(person)}>
+                <Text style={styles.buttonText}>{person.connected ? "Friends" : sentTo[person.id] ? "Sent" : "Request"}</Text>
+              </Pressable>
+            </View>
+          ))}
+          {people.length === 0 && query.trim().length > 0 && <Text style={styles.empty}>No one matches "{query}" yet.</Text>}
+
+          {incoming.length > 0 && <Text style={styles.sectionLabel}>Requests</Text>}
+          {incoming.map(item => (
+            <View key={item.id} style={styles.roomCard}>
+              <View style={[styles.avatar, { backgroundColor: colorFor(item.from?.username || "?") }]}><Text style={styles.avatarText}>{(item.from?.name || "?")[0].toUpperCase()}</Text></View>
+              <Text style={[styles.messageText, { flex: 1 }]}>@{item.from?.username} wants to connect</Text>
+              <Pressable style={styles.smallButton} onPress={() => accept(item.id)}><Text style={styles.buttonText}>Accept</Text></Pressable>
+            </View>
+          ))}
+
+          <Text style={styles.sectionLabel}>Share an update</Text>
+          <View style={styles.searchBox}>
+            <TextInput style={[styles.inputInline, { minHeight: 44 }]} value={text} onChangeText={setText} placeholder="What's on your mind?" placeholderTextColor="#737b94" multiline />
+            <Pressable style={[styles.smallButton, (!text.trim() || busy) && styles.smallButtonMuted]} disabled={!text.trim() || busy} onPress={publish}><Text style={styles.buttonText}>Post</Text></Pressable>
+          </View>
+        </>
+      }
+      data={posts}
+      keyExtractor={item => item.id}
+      renderItem={({ item }) => (
+        <View style={styles.message}>
+          <View style={styles.postHeader}>
+            <View style={[styles.avatarXs, { backgroundColor: colorFor(item.userName) }]}><Text style={styles.avatarTextXs}>{item.userName[0].toUpperCase()}</Text></View>
+            <Text style={styles.messageUser}>{item.userName}</Text>
+          </View>
+          <Text style={styles.messageText}>{item.text}</Text>
+          <Text style={styles.time}>{new Date(item.createdAt).toLocaleString()}</Text>
+        </View>
+      )}
+      ListEmptyComponent={<Text style={styles.empty}>Friends' posts will appear here.</Text>}
+    />
   </SafeAreaView>;
 }
 
@@ -677,7 +830,14 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontWeight: "700",
   },
-  header: { padding: 16, flexDirection: "row", alignItems: "center", gap: 10 },
+  header: {
+    padding: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#171e33",
+  },
   back: { color: "white", fontSize: 34, lineHeight: 34 },
   roomInfo: { color: "#7f89a3", marginTop: 2 },
   live: { color: "#52d273", fontWeight: "800", fontSize: 11 },
@@ -689,6 +849,11 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     flexDirection: "row",
     alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   cardLabel: {
     color: "#aab2c5",
@@ -774,6 +939,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
   },
   avatar: {
     width: 48,
@@ -785,4 +955,32 @@ const styles = StyleSheet.create({
   },
   avatarText: { color: "white", fontWeight: "900", fontSize: 20 },
   roomTitle: { color: "white", fontWeight: "800", fontSize: 16 },
+  avatarSm: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarXs: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 8,
+  },
+  avatarTextXs: { color: "white", fontWeight: "900", fontSize: 11 },
+  postHeader: { flexDirection: "row", alignItems: "center", marginBottom: 4 },
+  searchBox: { flexDirection: "row", gap: 8, marginBottom: 14, alignItems: "center" },
+  sectionLabel: {
+    color: "#7f89a3",
+    fontWeight: "800",
+    fontSize: 12,
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    marginBottom: 10,
+    marginTop: 6,
+  },
+  smallButtonMuted: { backgroundColor: "#2a3350" },
 });
