@@ -54,6 +54,27 @@ html = html.replace(/<meta name="viewport"[^>]*>/,
 // iOS Safari ignores user-scalable=no, so block pinch zoom explicitly (double-tap is handled by touch-action in CSS).
 const script = `
 <script>
+  // iOS home-screen apps can report a viewport that stops above the home
+  // indicator. In standalone mode, size the app to the real screen height.
+  (function () {
+    var standalone = window.navigator.standalone === true ||
+      (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+    if (!standalone) return;
+    function fit() {
+      var root = document.getElementById("root");
+      if (!root) return;
+      var portrait = window.innerHeight >= window.innerWidth;
+      var screenH = portrait
+        ? Math.max(window.screen.width, window.screen.height)
+        : Math.min(window.screen.width, window.screen.height);
+      root.style.bottom = "auto";
+      root.style.height = Math.max(window.innerHeight, screenH) + "px";
+    }
+    fit();
+    window.addEventListener("resize", fit);
+    window.addEventListener("orientationchange", fit);
+    window.addEventListener("pageshow", fit);
+  })();
   ["gesturestart","gesturechange","gestureend"].forEach(function (e) {
     document.addEventListener(e, function (ev) { ev.preventDefault(); }, { passive: false });
   });
