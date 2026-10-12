@@ -14,8 +14,10 @@ const head = `
 <style id="lock-layout">
   :root { color-scheme: light dark; }
   html, body {
-    height: 100%;
     margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
     overflow: hidden;
     overscroll-behavior: none;          /* no rubber-band / pull-to-refresh */
     -webkit-text-size-adjust: 100%;     /* iOS can't resize text */
@@ -25,14 +27,19 @@ const head = `
     background: #f5f5f7;
   }
   @media (prefers-color-scheme: dark) { html, body { background: #0b0b10; } }
-  /* Fill the whole iPhone screen (incl. under the home indicator) */
-  html { min-height: -webkit-fill-available; }
+  /* Pin the app to the real screen edges. position:fixed with top/bottom 0
+     reaches under the Dynamic Island and the home indicator on iOS (100vh /
+     100% can stop short of them in a home-screen app). */
   #root {
-    height: 100vh;
-    height: 100dvh;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
     width: 100%;
     max-width: 520px;                   /* fixed phone-width column on big screens */
     margin: 0 auto;
+    display: flex;
   }
   /* iOS zooms the page when a focused input has font-size < 16px */
   input, textarea, select { font-size: 16px !important; }

@@ -282,6 +282,16 @@ function AppRoot() {
     const effective = mode === "system" ? (Appearance.getColorScheme() || "dark") : mode;
     C = effective === "light" ? LIGHT_C : DARK_C;
     styles = buildStyles(C);
+    // On web, paint the page itself (behind the app, under the notch and
+    // home indicator) in the app's own background so no strip of a different
+    // colour shows when the phone's theme and the app's theme differ.
+    if (Platform.OS === "web" && typeof document !== "undefined") {
+      document.documentElement.style.background = C.bg;
+      document.body.style.background = C.bg;
+      document.documentElement.style.colorScheme = effective;
+      let meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", C.bg);
+    }
     setThemeTick((t) => t + 1);
   }
   async function changeThemeMode(mode) {
