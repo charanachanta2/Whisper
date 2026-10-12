@@ -490,9 +490,10 @@ function AppRoot() {
       setScreen("main");
       setMainTab("chats");
     } catch (e) {
+      console.error("Auth request failed:", API_URL, e);
       Alert.alert(
         "Network error",
-        "Check that the backend is running and the API URL is correct.",
+        `Check that the backend is running and the API URL is correct.\n\nTrying: ${API_URL}`,
       );
     } finally {
       setLoading(false);
@@ -2541,7 +2542,7 @@ function buildStyles(C) {
     borderTopColor: C.border,
     backgroundColor: C.bg,
     paddingTop: 8,
-    paddingBottom: Platform.OS === "ios" ? 22 : 10,
+    paddingBottom: Platform.OS === "ios" ? 22 : Platform.OS === "web" ? "max(12px, env(safe-area-inset-bottom))" : 10,
   },
   tabItem: { flex: 1, alignItems: "center", gap: 2 },
   tabIcon: { fontSize: 22, opacity: 0.45 },

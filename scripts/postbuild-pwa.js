@@ -1,20 +1,60 @@
-// Injects PWA / iOS "Add to Home Screen" tags into the exported index.html.
+// Post-build step for the web export: PWA tags + locked, fixed-size layout.
 const fs = require("fs");
 const p = "dist/index.html";
 let html = fs.readFileSync(p, "utf8");
-const tags = `
+
+const head = `
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Music Chat">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#111111">`;
-if (!html.includes("manifest.webmanifest")) {
-  html = html.replace("</head>", tags + "\n</head>");
-}
-// allow content under the notch in standalone mode
-html = html.replace(/(<meta name="viewport" content=")([^"]*)"/, (m, a, b) =>
-  b.includes("viewport-fit") ? m : `${a}${b}, viewport-fit=cover"`);
+<meta name="theme-color" content="#0b0b10">
+<style id="lock-layout">
+  :root { color-scheme: light dark; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    overscroll-behavior: none;          /* no rubber-band / pull-to-refresh */
+    -webkit-text-size-adjust: 100%;     /* iOS can't resize text */
+    text-size-adjust: 100%;
+    touch-action: manipulation;         /* no double-tap zoom */
+    -webkit-tap-highlight-color: transparent;
+    background: #f5f5f7;
+  }
+  @media (prefers-color-scheme: dark) { html, body { background: #0b0b10; } }
+  /* Fill the whole iPhone screen (incl. under the home indicator) */
+  html { min-height: -webkit-fill-available; }
+  #root {
+    height: 100vh;
+    height: 100dvh;
+    width: 100%;
+    max-width: 520px;                   /* fixed phone-width column on big screens */
+    margin: 0 auto;
+  }
+  /* iOS zooms the page when a focused input has font-size < 16px */
+  input, textarea, select { font-size: 16px !important; }
+</style>`;
+
+if (!html.includes("manifest.webmanifest")) html = html.replace("</head>", head + "\n</head>");
+
+// Lock the viewport: no pinch zoom, extend under notch / home indicator.
+html = html.replace(/<meta name="viewport"[^>]*>/,
+  '<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">');
+
+// iOS Safari ignores user-scalable=no, so block pinch zoom explicitly (double-tap is handled by touch-action in CSS).
+const script = `
+<script>
+  ["gesturestart","gesturechange","gestureend"].forEach(function (e) {
+    document.addEventListener(e, function (ev) { ev.preventDefault(); }, { passive: false });
+  });
+  document.addEventListener("touchmove", function (ev) {
+    if (ev.touches.length > 1) ev.preventDefault();
+  }, { passive: false });
+</script>`;
+if (!html.includes("gesturestart")) html = html.replace("</body>", script + "\n</body>");
+
 fs.writeFileSync(p, html);
-console.log("PWA tags injected into", p);
+console.log("PWA + locked layout injected into", p);

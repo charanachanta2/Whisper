@@ -16,7 +16,9 @@
       "expo-document-picker",
       "expo-video",
       "expo-audio",
-      "expo-status-bar"
+      "expo-status-bar",
+      "expo-font",
+      "expo-asset"
     ],
     "scheme": "musicchat",
     "ios": {
