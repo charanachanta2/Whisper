@@ -204,7 +204,7 @@ export function initWebNotificationBridge() {
 // ---------------------------------------------------------------------------
 // Pop-up banner (mounted once, inside SafeAreaProvider)
 // ---------------------------------------------------------------------------
-const ICONS = { message: "chatbubble", friend_request: "person-add", friend_accept: "people", prompt: "notifications" };
+const ICONS = { message: "chatbubble", friend_request: "person-add", friend_accept: "people", post_like: "heart", post_comment: "chatbubble-ellipses", prompt: "notifications" };
 const SHOW_MS = 5000;
 
 export function NotificationHost({ colorFor }) {

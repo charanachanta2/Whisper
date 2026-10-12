@@ -18,6 +18,7 @@ import {
   Dimensions,
   Appearance,
   ScrollView,
+  PanResponder,
 } from "react-native";
 // react-native core's SafeAreaView is iOS-only (it's a no-op on Android),
 // which is why the header/status bar area could overlap system content on
@@ -1739,30 +1740,172 @@ function UserAvatar({ name, avatarUrl, thumbUrl, size = 38, style }) {
   );
 }
 
-// A single post, shared by the Home feed and the Profile tab. When the
-// viewer owns the post, a three-dot menu offers Edit/Delete; other
-// people's posts render the same way with no menu at all.
-function PostCard({ item, isOwner, onEdit, onDelete }) {
-  function confirmDelete() {
-    Alert.alert("Delete post?", "This can't be undone.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => onDelete(item) },
-    ]);
+// Simple bottom sheet of actions. Alert.alert with 3 buttons can't work on
+// the web build (it collapses to window.confirm and only ever reaches the
+// first button), so post options use this real modal on every platform.
+function ActionSheet({ visible, title, actions, onClose }) {
+  return (
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={[styles.modalSheet, { paddingBottom: 24 }]} onPress={() => {}}>
+          {!!title && <Text style={[styles.roomInfo, { textAlign: "center", marginBottom: 10 }]}>{title}</Text>}
+          {actions.map((a) => (
+            <Pressable key={a.label} style={styles.sheetRow} onPress={() => { onClose(); a.onPress && a.onPress(); }}>
+              {!!a.icon && <Ionicons name={a.icon} size={20} color={a.destructive ? C.danger || "#E5484D" : C.text} />}
+              <Text style={[styles.sheetRowText, a.destructive && { color: C.danger || "#E5484D" }]}>{a.label}</Text>
+            </Pressable>
+          ))}
+          <Pressable style={[styles.sheetRow, { justifyContent: "center", marginTop: 4 }]} onPress={onClose}>
+            <Text style={[styles.sheetRowText, { color: C.textMuted }]}>Cancel</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+function timeAgo(iso) {
+  const sec = Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (sec < 60) return "just now";
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
+}
+
+// Comments for one post. `post` is kept fresh by the parent; every change
+// the server confirms is handed back through onChanged(updatedPost).
+function CommentsModal({ visible, post, me, authedApi, onClose, onChanged }) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [deleting, setDeleting] = useState(null);
+  if (!post) return null;
+  const comments = post.comments || [];
+
+  async function send() {
+    const body = text.trim();
+    if (!body || sending) return;
+    setSending(true);
+    try {
+      const res = await authedApi(`/api/posts/${post.id}/comments`, { method: "POST", body: JSON.stringify({ text: body }) });
+      if (res.status === 401) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return Alert.alert("Couldn't comment", data.error || "Something went wrong.");
+      setText("");
+      onChanged(data.post);
+    } catch (e) {
+      Alert.alert("Couldn't comment", "Check your connection and try again.");
+    } finally {
+      setSending(false);
+    }
   }
-  function openMenu() {
-    Alert.alert("Post options", undefined, [
-      { text: "Edit", onPress: () => onEdit(item) },
-      { text: "Delete", style: "destructive", onPress: confirmDelete },
-      { text: "Cancel", style: "cancel" },
-    ]);
+  async function remove(comment) {
+    try {
+      const res = await authedApi(`/api/posts/${post.id}/comments/${comment.id}`, { method: "DELETE" });
+      if (res.status === 401) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return Alert.alert("Couldn't delete", data.error || "Something went wrong.");
+      onChanged(data.post);
+    } catch (e) {
+      Alert.alert("Couldn't delete", "Check your connection and try again.");
+    }
   }
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalSheet, { maxHeight: "80%" }]}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.titleSmall}>Comments{comments.length ? ` (${comments.length})` : ""}</Text>
+              <Pressable onPress={onClose} hitSlop={10}><Ionicons name="close" size={24} color={C.textMuted} /></Pressable>
+            </View>
+            <FlatList
+              style={{ flexGrow: 0, maxHeight: 360 }}
+              data={comments}
+              keyExtractor={(c) => c.id}
+              keyboardShouldPersistTaps="handled"
+              ListEmptyComponent={<Text style={styles.empty}>No comments yet. Be the first.</Text>}
+              renderItem={({ item: c }) => {
+                const canDelete = c.userId === me?.id || post.userId === me?.id;
+                return (
+                  <View style={styles.commentRow}>
+                    <UserAvatar name={c.userName} avatarUrl={c.userAvatarUrl} size={30} style={{ marginRight: 10 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.commentMeta}><Text style={styles.messageUser}>{c.userName}</Text>  {timeAgo(c.createdAt)}</Text>
+                      <Text style={styles.messageText}>{c.text}</Text>
+                    </View>
+                    {canDelete && (
+                      <Pressable hitSlop={10} onPress={() => setDeleting(c)} style={{ padding: 4 }}>
+                        <Ionicons name="trash-outline" size={16} color={C.textMuted} />
+                      </Pressable>
+                    )}
+                  </View>
+                );
+              }}
+            />
+            <View style={styles.commentInputRow}>
+              <TextInput
+                style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                value={text}
+                onChangeText={setText}
+                placeholder="Add a comment..."
+                placeholderTextColor={C.textFaint}
+                maxLength={500}
+                onSubmitEditing={send}
+                returnKeyType="send"
+              />
+              <Pressable style={[styles.smallButton, (!text.trim() || sending) && styles.smallButtonMuted, { marginLeft: 8 }]} disabled={!text.trim() || sending} onPress={send}>
+                {sending ? <ActivityIndicator size="small" color={C.white} /> : <Text style={[styles.buttonText, !text.trim() && styles.smallButtonMutedText]}>Send</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+      <ActionSheet
+        visible={!!deleting}
+        title="Delete this comment?"
+        actions={[{ label: "Delete comment", icon: "trash-outline", destructive: true, onPress: () => deleting && remove(deleting) }]}
+        onClose={() => setDeleting(null)}
+      />
+    </Modal>
+  );
+}
+
+// A single post, shared by the Home feed and the Profile tab. The owner gets
+// a three-dot menu (Edit / Delete); everyone gets Like and Comment.
+// onChanged(post) receives the server's updated copy after a like/comment.
+function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [liking, setLiking] = useState(false);
+
+  async function toggleLike() {
+    if (liking || !authedApi) return;
+    setLiking(true);
+    const want = !item.likedByMe;
+    // Optimistic update so the heart responds instantly.
+    onChanged && onChanged({ ...item, likedByMe: want, likeCount: Math.max(0, (item.likeCount || 0) + (want ? 1 : -1)) });
+    try {
+      const res = await authedApi(`/api/posts/${item.id}/like`, { method: "POST", body: JSON.stringify({ liked: want }) });
+      if (res.status === 401) return;
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.post) onChanged && onChanged(data.post);
+      else onChanged && onChanged(item); // roll back
+    } catch (e) {
+      onChanged && onChanged(item);
+    } finally {
+      setLiking(false);
+    }
+  }
+
   return (
     <View style={styles.postCard}>
       <View style={styles.postHeader}>
         <UserAvatar name={item.userName} avatarUrl={item.userAvatarUrl} thumbUrl={item.userAvatarThumbUrl} size={24} style={{ marginRight: 8 }} />
         <Text style={[styles.messageUser, { flex: 1 }]}>{item.userName}</Text>
         {isOwner && (
-          <Pressable onPress={openMenu} hitSlop={10} style={styles.postMenuBtn}>
+          <Pressable onPress={() => setMenuOpen(true)} hitSlop={10} style={styles.postMenuBtn}>
             <Ionicons name="ellipsis-horizontal" size={18} color={C.textMuted} />
           </Pressable>
         )}
@@ -1783,10 +1926,43 @@ function PostCard({ item, isOwner, onEdit, onDelete }) {
           />
         )
       )}
-      <Text style={styles.time}>
-        {new Date(item.createdAt).toLocaleString()}
-        {item.editedAt ? <Text style={styles.editedTag}> · Edited</Text> : null}
-      </Text>
+      <View style={styles.postActionsRow}>
+        <Pressable style={styles.postAction} onPress={toggleLike} hitSlop={8}>
+          <Ionicons name={item.likedByMe ? "heart" : "heart-outline"} size={22} color={item.likedByMe ? "#E5484D" : C.textMuted} />
+          <Text style={styles.postActionText}>{item.likeCount || 0}</Text>
+        </Pressable>
+        <Pressable style={styles.postAction} onPress={() => setCommentsOpen(true)} hitSlop={8}>
+          <Ionicons name="chatbubble-outline" size={20} color={C.textMuted} />
+          <Text style={styles.postActionText}>{item.commentCount || 0}</Text>
+        </Pressable>
+        <Text style={[styles.time, { marginTop: 0, marginLeft: "auto" }]}>
+          {new Date(item.createdAt).toLocaleString()}
+          {item.editedAt ? <Text style={styles.editedTag}> · Edited</Text> : null}
+        </Text>
+      </View>
+      <ActionSheet
+        visible={menuOpen}
+        title="Post options"
+        actions={[
+          { label: "Edit post", icon: "create-outline", onPress: () => onEdit && onEdit(item) },
+          { label: "Delete post", icon: "trash-outline", destructive: true, onPress: () => setTimeout(() => setConfirmOpen(true), 250) },
+        ]}
+        onClose={() => setMenuOpen(false)}
+      />
+      <ActionSheet
+        visible={confirmOpen}
+        title="Delete this post? This can't be undone."
+        actions={[{ label: "Yes, delete post", icon: "trash-outline", destructive: true, onPress: () => onDelete && onDelete(item) }]}
+        onClose={() => setConfirmOpen(false)}
+      />
+      <CommentsModal
+        visible={commentsOpen}
+        post={item}
+        me={me}
+        authedApi={authedApi}
+        onClose={() => setCommentsOpen(false)}
+        onChanged={(p) => onChanged && onChanged(p)}
+      />
     </View>
   );
 }
@@ -2023,7 +2199,7 @@ function HomeTab({ authedApi, token, me }) {
         data={posts}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
-          <PostCard item={item} isOwner={item.userId === me?.id} onEdit={setEditingPost} onDelete={deletePost} />
+          <PostCard item={item} isOwner={item.userId === me?.id} me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
         )}
         ListEmptyComponent={loadingPosts ? <ActivityIndicator style={{ marginTop: 30 }} /> : <Text style={styles.empty}>Friends' posts will appear here.</Text>}
       />
@@ -2155,6 +2331,128 @@ function EditBioModal({ visible, initialBio, authedApi, onClose, onSaved }) {
   );
 }
 
+// Drag to position, +/- (or the bar) to zoom, then "Use photo" crops exactly
+// what is inside the circle and resizes it to 512x512.
+const CROP_SIZE = Math.min(300, SCREEN_WIDTH - 64);
+const MAX_ZOOM = 4;
+function AvatarCropModal({ asset, onCancel, onDone }) {
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [busy, setBusy] = useState(false);
+  const live = useRef({ zoom: 1, x: 0, y: 0, w: 1, h: 1 });
+  const dragStart = useRef({ x: 0, y: 0 });
+
+  const w = asset?.width || 1;
+  const h = asset?.height || 1;
+  const cover = CROP_SIZE / Math.min(w, h); // scale at which the photo just fills the circle
+  live.current.w = w; live.current.h = h;
+
+  function clamp(x, y, z) {
+    const scale = cover * z;
+    const maxX = Math.max(0, (w * scale - CROP_SIZE) / 2);
+    const maxY = Math.max(0, (h * scale - CROP_SIZE) / 2);
+    return { x: Math.min(maxX, Math.max(-maxX, x)), y: Math.min(maxY, Math.max(-maxY, y)) };
+  }
+  function apply(next) {
+    live.current = { ...live.current, ...next };
+    setZoom(live.current.zoom);
+    setOffset({ x: live.current.x, y: live.current.y });
+  }
+  useEffect(() => { if (asset) apply({ zoom: 1, x: 0, y: 0 }); }, [asset?.uri]);
+
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => { dragStart.current = { x: live.current.x, y: live.current.y }; },
+      onPanResponderMove: (_, g) => {
+        const { zoom: z, w: lw, h: lh } = live.current;
+        const scale = (CROP_SIZE / Math.min(lw, lh)) * z;
+        const maxX = Math.max(0, (lw * scale - CROP_SIZE) / 2);
+        const maxY = Math.max(0, (lh * scale - CROP_SIZE) / 2);
+        const x = Math.min(maxX, Math.max(-maxX, dragStart.current.x + g.dx));
+        const y = Math.min(maxY, Math.max(-maxY, dragStart.current.y + g.dy));
+        live.current.x = x; live.current.y = y;
+        setOffset({ x, y });
+      },
+    })
+  ).current;
+
+  function setZoomTo(z) {
+    const nz = Math.min(MAX_ZOOM, Math.max(1, z));
+    const c = clamp(live.current.x, live.current.y, nz);
+    apply({ zoom: nz, ...c });
+  }
+  // Tap/click anywhere on the bar to jump to that zoom level.
+  function onBarPress(e) {
+    const x = e.nativeEvent.locationX;
+    setZoomTo(1 + (x / BAR_W) * (MAX_ZOOM - 1));
+  }
+  const BAR_W = 180;
+
+  async function confirm() {
+    setBusy(true);
+    try {
+      const scale = cover * zoom;
+      const size = CROP_SIZE / scale; // side of the visible square, in source pixels
+      let originX = w / 2 - size / 2 - offset.x / scale;
+      let originY = h / 2 - size / 2 - offset.y / scale;
+      originX = Math.max(0, Math.min(w - size, originX));
+      originY = Math.max(0, Math.min(h - size, originY));
+      const ctx = ImageManipulator.ImageManipulator.manipulate(asset.uri);
+      ctx.crop({ originX: Math.round(originX), originY: Math.round(originY), width: Math.round(size), height: Math.round(size) });
+      ctx.resize({ width: 512, height: 512 });
+      const ref = await ctx.renderAsync();
+      const out = await ref.saveAsync({ format: ImageManipulator.SaveFormat.JPEG, compress: 0.85 });
+      onDone({ uri: out.uri, fileName: "avatar.jpg", mimeType: "image/jpeg" });
+    } catch (e) {
+      Alert.alert("Couldn't crop", "Please try a different photo.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!asset) return null;
+  const scale = cover * zoom;
+  return (
+    <Modal visible animationType="slide" transparent onRequestClose={onCancel}>
+      <View style={[styles.modalBackdrop, { justifyContent: "center", padding: 16 }]}>
+        <View style={[styles.modalSheet, { borderRadius: 24 }]}>
+          <View style={styles.modalHeaderRow}>
+            <Text style={styles.titleSmall}>Adjust photo</Text>
+            <Pressable onPress={onCancel} hitSlop={10}><Ionicons name="close" size={24} color={C.textMuted} /></Pressable>
+          </View>
+          <Text style={[styles.roomInfo, { textAlign: "center", marginBottom: 12 }]}>Drag to move, zoom to resize</Text>
+          <View style={[styles.cropViewport, { width: CROP_SIZE, height: CROP_SIZE, borderRadius: CROP_SIZE / 2 }]} {...pan.panHandlers}>
+            <Image
+              source={{ uri: asset.uri }}
+              style={{
+                position: "absolute",
+                width: w * scale,
+                height: h * scale,
+                left: CROP_SIZE / 2 - (w * scale) / 2 + offset.x,
+                top: CROP_SIZE / 2 - (h * scale) / 2 + offset.y,
+              }}
+              draggable={false}
+            />
+            <View pointerEvents="none" style={[styles.cropRing, { borderRadius: CROP_SIZE / 2 }]} />
+          </View>
+          <View style={styles.zoomRow}>
+            <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom - 0.25)}><Ionicons name="remove" size={22} color={C.text} /></Pressable>
+            <Pressable onPress={onBarPress} hitSlop={{ top: 14, bottom: 14 }} style={[styles.zoomTrack, { width: BAR_W }]}>
+              <View pointerEvents="none" style={[styles.zoomFill, { width: ((zoom - 1) / (MAX_ZOOM - 1)) * BAR_W }]} />
+            </Pressable>
+            <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom + 0.25)}><Ionicons name="add" size={22} color={C.text} /></Pressable>
+          </View>
+          <Pressable style={[styles.button, { marginTop: 20 }, busy && { opacity: 0.7 }]} onPress={confirm} disabled={busy}>
+            {busy ? <ActivityIndicator color={C.white} /> : <Text style={styles.buttonText}>Use photo</Text>}
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onChangeTheme }) {
   const [posts, setPosts] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
@@ -2162,6 +2460,7 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
   const [bioModalOpen, setBioModalOpen] = useState(false);
   const [editingPost, setEditingPost] = useState(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [cropAsset, setCropAsset] = useState(null);
 
   const load = async () => {
     setLoadingPosts(true);
@@ -2180,16 +2479,22 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
   };
   useEffect(() => { load(); }, [me?.id]);
 
+  // Step 1: pick a photo. Step 2: AvatarCropModal lets the person drag and
+  // zoom it inside a circle (the built-in picker editor doesn't exist on
+  // web). Step 3: the cropped 512px square is uploaded.
   async function changeAvatar() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return Alert.alert("Permission needed", "Allow photo access to set a profile photo.");
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8, allowsEditing: true, aspect: [1, 1] });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 1 });
     if (result.canceled) return;
+    setCropAsset(result.assets[0]);
+  }
+
+  async function uploadCropped(cropped) {
+    setCropAsset(null);
     setUploadingAvatar(true);
     try {
-      // 512px is plenty for a profile photo. /api/me/avatar resizes, saves it
-      // on the profile and removes the old photo in a single request.
-      const asset = await prepareImage(result.assets[0], 512);
+      const asset = cropped;
       const data = await uploadAsset(token, {
         uri: asset.uri,
         fileName: asset.fileName || "avatar.jpg",
@@ -2232,7 +2537,7 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
           <View style={{ paddingHorizontal: 16 }}>
-            <PostCard item={item} isOwner onEdit={setEditingPost} onDelete={deletePost} />
+            <PostCard item={item} isOwner me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
           </View>
         )}
         ListHeaderComponent={
@@ -2303,13 +2608,14 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
         onClose={() => setBioModalOpen(false)}
         onSaved={onUpdateMe}
       />
+      <AvatarCropModal asset={cropAsset} onCancel={() => setCropAsset(null)} onDone={uploadCropped} />
       <EditPostModal
         visible={!!editingPost}
         post={editingPost}
         token={token}
         authedApi={authedApi}
         onClose={() => setEditingPost(null)}
-        onSaved={(updated) => setPosts((old) => old.map((p) => (p.id === updated.id ? updated : p)))}
+        onSaved={(updated) => setPosts((old) => old.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)))}
       />
     </View>
   );
@@ -2739,6 +3045,20 @@ function buildStyles(C) {
   statLabel: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   divider: { height: 1, backgroundColor: C.border, marginTop: 20 },
   postMenuBtn: { padding: 6, marginLeft: 4 },
+  sheetRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 14, paddingHorizontal: 8 },
+  sheetRowText: { color: C.text, fontSize: 16, fontWeight: "700" },
+  postActionsRow: { flexDirection: "row", alignItems: "center", marginTop: 10, gap: 18 },
+  postAction: { flexDirection: "row", alignItems: "center", gap: 6 },
+  postActionText: { color: C.textMuted, fontSize: 13, fontWeight: "700" },
+  commentRow: { flexDirection: "row", alignItems: "flex-start", paddingVertical: 8 },
+  commentMeta: { color: C.textFaint, fontSize: 11, marginBottom: 2 },
+  commentInputRow: { flexDirection: "row", alignItems: "center", marginTop: 12 },
+  cropViewport: { overflow: "hidden", alignSelf: "center", backgroundColor: "#000" },
+  cropRing: { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, borderWidth: 2, borderColor: "rgba(255,255,255,0.9)" },
+  zoomRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 14, marginTop: 16 },
+  zoomBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: C.surfaceRaised },
+  zoomTrack: { flex: 1, height: 6, borderRadius: 3, backgroundColor: C.surfaceRaised, maxWidth: 200 },
+  zoomFill: { height: 6, borderRadius: 3, backgroundColor: C.accent },
   editedTag: { color: C.textFaint },
 
   // -- Settings --
