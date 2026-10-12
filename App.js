@@ -207,7 +207,7 @@ async function uploadAsset(token, asset, { endpoint = "/api/upload", purpose } =
     body: JSON.stringify({ fileName: name, mimeType: type, data: base64, purpose }),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Upload failed.");
+  if (!res.ok) throw new Error(data.error || `Upload failed (server replied ${res.status}).`);
   return { ...data, fileName: data.fileName || name };
 }
 
