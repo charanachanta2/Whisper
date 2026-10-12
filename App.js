@@ -44,6 +44,17 @@ import { io } from "socket.io-client";
 // background. StatusBar (rendered per-screen below, driven by C.mode) fixes
 // that on both platforms.
 import { StatusBar } from "expo-status-bar";
+import {
+  NotificationHost,
+  NotificationSettingsRow,
+  emitNotification,
+  onNotificationOpen,
+  startVisibilityHeartbeat,
+  initWebNotificationBridge,
+  maybePromptForPush,
+  syncWebPush,
+  disableWebPush,
+} from "./notifications";
 
 // Keep this in .env so development, staging, and production can each use
 // their own backend. Do not hard-code a deployment URL here: it prevents the
@@ -100,6 +111,8 @@ const USER_KEY = "music_chat_user";
 // Persists the person's chosen appearance ("system" | "light" | "dark") so
 // it survives app restarts instead of resetting to the default every time.
 const THEME_KEY = "music_chat_theme";
+// Remembers that the one-time "turn on notifications" pop-up was already shown.
+const PUSH_PROMPT_KEY = "music_chat_push_prompted";
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
 // Shared adaptive image renderer used everywhere a shared photo shows up
@@ -216,6 +229,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <AppRoot />
+      <NotificationHost colorFor={colorFor} />
     </SafeAreaProvider>
   );
 }
@@ -274,6 +288,16 @@ function AppRoot() {
   }
 
   const listRef = useRef(null);
+  // Latest screen state for notification callbacks (socket handlers are created once per login).
+  const screenRef = useRef(screen);
+  const mainTabRef = useRef(mainTab);
+  const activeRoomRef = useRef(activeRoom);
+  const pendingOpenRef = useRef(null);
+  const tokenRef = useRef(null);
+  tokenRef.current = token;
+  screenRef.current = screen;
+  mainTabRef.current = mainTab;
+  activeRoomRef.current = activeRoom;
 
   // Recomputes the actual colors to show (light vs dark) for a given saved
   // preference, reassigns the module-level C/styles bindings, then bumps
@@ -386,12 +410,73 @@ function AppRoot() {
       }
     });
 
+    // In-app pop-up for activity elsewhere (new message, friend request, ...).
+    s.on("notification", (n) => {
+      if (!n) return;
+      const viewingThatChat = screenRef.current === "chat" && activeRoomRef.current?.id === n.roomId;
+      if (n.kind === "message" && viewingThatChat) return; // already looking at it
+      emitNotification(n);
+      // A newly accepted friend means a new direct chat: refresh the chat list.
+      if (n.kind === "friend_accept") setRoomsRefreshKey((k) => k + 1);
+    });
+    // Lets the server skip the OS push while the app is on screen.
+    let stopHeartbeat = () => {};
+    s.on("connect", () => { stopHeartbeat(); stopHeartbeat = startVisibilityHeartbeat(s); });
+
     setSocket(s);
     return () => {
+      stopHeartbeat();
       s.disconnect();
       setSocket(null);
       setSocketReady(false);
     };
+  }, [token]);
+
+  // Tapping a pop-up (or an OS notification on the PWA) opens the right screen.
+  function openFromNotification(n) {
+    if (!n) return;
+    if (n.room) return openRoom(n.room);
+    if (n.roomId) {
+      (async () => {
+        try {
+          const res = await authedApi("/api/rooms");
+          if (!res.ok) return;
+          const data = await res.json();
+          const room = (data.rooms || []).find((r) => r.id === n.roomId);
+          if (room) return room.isVoice ? openVoiceRoom(room) : openRoom(room);
+        } catch (_) {}
+      })();
+      return;
+    }
+    if (n.kind === "friend_request") { setScreen("main"); setMainTab("discover"); }
+  }
+  const openFromNotificationRef = useRef(openFromNotification);
+  openFromNotificationRef.current = openFromNotification;
+
+  // Listen for taps (pop-up, or OS notification via the service worker). If the
+  // app is still signing in, remember the tap and handle it once we are.
+  useEffect(() => {
+    const unsubscribe = onNotificationOpen((n) => {
+      if (tokenRef.current) openFromNotificationRef.current(n);
+      else pendingOpenRef.current = n;
+    });
+    const stopBridge = initWebNotificationBridge();
+    return () => { unsubscribe(); stopBridge(); };
+  }, []);
+
+  // After sign-in: handle a pending tap, re-sync this device's web push, and
+  // (once) invite the person to turn on OS notifications.
+  useEffect(() => {
+    if (!token) return;
+    if (pendingOpenRef.current) {
+      const n = pendingOpenRef.current;
+      pendingOpenRef.current = null;
+      setTimeout(() => openFromNotificationRef.current(n), 300);
+    }
+    syncWebPush(authedApi);
+    const t = setTimeout(() => maybePromptForPush(authedApi, AsyncStorage, PUSH_PROMPT_KEY), 2500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   // Join/leave the active chat's room as it changes, without touching the
@@ -700,6 +785,7 @@ function AppRoot() {
   // Shares a link to whatever you're currently playing. There is no way
   // for an app to read what's playing inside a *different* app without a
   async function logout() {
+    try { await disableWebPush(authedApi); } catch (_) {}
     await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
     socket?.disconnect();
     setToken(null);
@@ -1961,7 +2047,7 @@ function PostVideo({ uri }) {
 // Theme + account settings, opened from the gear icon on Profile. A modal
 // (not a separate tab) since it's a handful of one-off preferences, not
 // something someone browses regularly.
-function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout }) {
+function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, authedApi }) {
   const options = [
     { key: "system", label: "System", icon: "phone-portrait-outline" },
     { key: "light", label: "Light", icon: "sunny-outline" },
@@ -1994,6 +2080,13 @@ function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout })
               );
             })}
           </View>
+
+          {Platform.OS === "web" && (
+            <>
+              <Text style={[styles.sectionLabel, { marginTop: 22 }]}>Notifications</Text>
+              <NotificationSettingsRow authedApi={authedApi} colors={C} />
+            </>
+          )}
 
           <Text style={[styles.sectionLabel, { marginTop: 22 }]}>Account</Text>
           <Pressable style={styles.logoutRow} onPress={onLogout}>
@@ -2201,6 +2294,7 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
         themeMode={themeMode}
         onChangeTheme={onChangeTheme}
         onLogout={() => { setSettingsOpen(false); onLogout(); }}
+        authedApi={authedApi}
       />
       <EditBioModal
         visible={bioModalOpen}
