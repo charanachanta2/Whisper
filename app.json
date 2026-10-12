@@ -6,11 +6,29 @@
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "output": "single",
+      "name": "Music Chat",
+      "themeColor": "#000000"
     },
     "plugins": [
       "expo-image-picker",
-      "expo-document-picker"
-    ]
+      "expo-document-picker",
+      "expo-video",
+      "expo-audio",
+      "expo-status-bar"
+    ],
+    "scheme": "musicchat",
+    "ios": {
+      "bundleIdentifier": "com.yourname.musicchat",
+      "supportsTablet": true,
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "Used to take photos to share in chats.",
+        "NSPhotoLibraryUsageDescription": "Used to choose photos and videos to share in chats.",
+        "NSMicrophoneUsageDescription": "Used for voice rooms."
+      }
+    }
   }
 }

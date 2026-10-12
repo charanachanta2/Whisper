@@ -60,6 +60,41 @@ const SOCKET_URL = (process.env.EXPO_PUBLIC_SOCKET_URL || API_URL)
 console.log("API URL:", API_URL);
 console.log("Socket URL:", SOCKET_URL);
 
+
+// --- Web compatibility ---------------------------------------------------
+// React Native's Alert.alert is a silent no-op in browsers (react-native-web),
+// so every confirm/error dialog would just vanish on the website. Map it to
+// window.alert / window.confirm on web only; native iOS/Android is untouched.
+if (Platform.OS === "web") {
+  Alert.alert = (title, message, buttons) => {
+    const text = [title, message].filter(Boolean).join("\n\n");
+    if (!buttons || buttons.length <= 1) {
+      window.alert(text);
+      buttons && buttons[0] && buttons[0].onPress && buttons[0].onPress();
+      return;
+    }
+    const cancel = buttons.find((b) => b.style === "cancel");
+    const action = buttons.find((b) => b !== cancel) || buttons[buttons.length - 1];
+    if (window.confirm(text)) action.onPress && action.onPress();
+    else cancel && cancel.onPress && cancel.onPress();
+  };
+}
+
+// Reads a picked file as base64. FileSystem.readAsStringAsync is not
+// supported on web, so use fetch + FileReader there.
+async function readAsBase64(uri) {
+  if (Platform.OS !== "web") {
+    return FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+  }
+  const blob = await (await fetch(uri)).blob();
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.onerror = () => reject(new Error("Could not read file."));
+    r.readAsDataURL(blob);
+  });
+}
+
 const TOKEN_KEY = "music_chat_token";
 const USER_KEY = "music_chat_user";
 // Persists the person's chosen appearance ("system" | "light" | "dark") so
@@ -152,9 +187,7 @@ async function uploadAsset(token, asset, { endpoint = "/api/upload", purpose } =
   // body is small (typically 100-400KB).
   const name = asset.fileName || asset.name || `upload-${Date.now()}`;
   const type = asset.mimeType || asset.type || "application/octet-stream";
-  const base64 = await FileSystem.readAsStringAsync(asset.uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
+  const base64 = await readAsBase64(asset.uri);
   const res = await fetch(`${API_URL}${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
