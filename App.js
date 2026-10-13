@@ -824,7 +824,7 @@ function AppRoot() {
   function shareRoomInvite() {
     if (!activeRoom) return;
     Share.share({
-      message: `Join me in "${activeRoom.name}" on Music Chat! Send me your username and I'll add you to the chat.`,
+      message: `Join me in "${activeRoom.name}" on Hush! Send me your username and I'll add you to the chat.`,
     }).catch(() => {});
   }
 
@@ -851,7 +851,7 @@ function AppRoot() {
             contentContainerStyle={[styles.center, { flexGrow: 1 }]}
             keyboardShouldPersistTaps="handled"
           >
-        <Text style={styles.logo}>Music Chat</Text>
+        <Text style={styles.logo}>Hush</Text>
         <Text style={styles.subtitle}>
           Private chats for people you invite.
         </Text>

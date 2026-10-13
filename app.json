@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Music Chat",
+    "name": "Hush",
     "slug": "music-chat",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,7 +8,8 @@
     "web": {
       "bundler": "metro",
       "output": "single",
-      "name": "Music Chat",
+      "name": "Hush",
+      "shortName": "Hush",
       "themeColor": "#000000"
     },
     "plugins": [

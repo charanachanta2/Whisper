@@ -8,7 +8,7 @@ const head = `
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Music Chat">
+<meta name="apple-mobile-web-app-title" content="Hush">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#0b0b10">
 <style id="lock-layout">
@@ -46,6 +46,11 @@ const head = `
 </style>`;
 
 if (!html.includes("manifest.webmanifest")) html = html.replace("</head>", head + "\n</head>");
+
+// The browser tab / "Add to Home Screen" default name is the page <title>.
+html = /<title>[\s\S]*?<\/title>/.test(html)
+  ? html.replace(/<title>[\s\S]*?<\/title>/, "<title>Hush</title>")
+  : html.replace("</head>", "<title>Hush</title>\n</head>");
 
 // Lock the viewport: no pinch zoom, extend under notch / home indicator.
 html = html.replace(/<meta name="viewport"[^>]*>/,

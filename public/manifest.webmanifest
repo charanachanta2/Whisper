@@ -1,6 +1,7 @@
 {
-  "name": "Music Chat",
-  "short_name": "Music Chat",
+  "name": "Hush",
+  "short_name": "Hush",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

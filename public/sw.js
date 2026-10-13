@@ -1,4 +1,4 @@
-// Music Chat service worker: OS push notifications only.
+// Hush service worker: OS push notifications only.
 // It intentionally does NOT cache anything or intercept network requests, so it
 // cannot change how the PWA loads or looks.
 
@@ -12,7 +12,7 @@ self.addEventListener("push", (event) => {
   } catch (_) {
     data = { body: event.data ? event.data.text() : "" };
   }
-  const title = data.title || "Music Chat";
+  const title = data.title || "Hush";
   // iOS requires every push to show a notification, so we always show one.
   // (The server already skips pushes while the app is open on screen.)
   event.waitUntil(
