@@ -262,6 +262,8 @@ function AppRoot() {
   const [socket, setSocket] = useState(null);
   const [socketReady, setSocketReady] = useState(false);
   const [roomsRefreshKey, setRoomsRefreshKey] = useState(0);
+  const [notifUnread, setNotifUnread] = useState(0);
+  const [notifOpen, setNotifOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const attachAnim = useRef(new Animated.Value(0)).current;
@@ -415,7 +417,12 @@ function AppRoot() {
     s.on("notification", (n) => {
       if (!n) return;
       const viewingThatChat = screenRef.current === "chat" && activeRoomRef.current?.id === n.roomId;
-      if (n.kind === "message" && viewingThatChat) return; // already looking at it
+      if (n.kind === "message" && viewingThatChat) {
+        // Already looking at it: don't pop up, and don't leave it unread in the bell.
+        if (n.notificationId) authedApi("/api/notifications/read", { method: "POST", body: JSON.stringify({ ids: [n.notificationId] }) }).catch(() => {});
+        return;
+      }
+      setNotifUnread((c) => c + 1);
       emitNotification(n);
       // A newly accepted friend means a new direct chat: refresh the chat list.
       if (n.kind === "friend_accept") setRoomsRefreshKey((k) => k + 1);
@@ -450,6 +457,7 @@ function AppRoot() {
       return;
     }
     if (n.kind === "friend_request") { setScreen("main"); setMainTab("discover"); }
+    if (n.kind === "post_like" || n.kind === "post_comment") { setScreen("main"); setMainTab("home"); }
   }
   const openFromNotificationRef = useRef(openFromNotification);
   openFromNotificationRef.current = openFromNotification;
@@ -464,6 +472,21 @@ function AppRoot() {
     const stopBridge = initWebNotificationBridge();
     return () => { unsubscribe(); stopBridge(); };
   }, []);
+
+  // Keep the bell's unread count fresh: on sign-in, and whenever the person
+  // returns to the main screen or switches tab (covers missed live events).
+  async function refreshUnread() {
+    try {
+      const res = await authedApi("/api/notifications");
+      if (!res.ok) return;
+      const data = await res.json();
+      setNotifUnread(data.unreadCount || 0);
+    } catch (_) {}
+  }
+  useEffect(() => {
+    if (token && screen === "main") refreshUnread();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, screen, mainTab]);
 
   // After sign-in: handle a pending tap, re-sync this device's web push, and
   // (once) invite the person to turn on OS notifications.
@@ -1036,13 +1059,15 @@ function AppRoot() {
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <StatusBar style={C.mode === "light" ? "dark" : "light"} />
       <View style={{ flex: 1 }}>
-        {mainTab === "home" && <HomeTab authedApi={authedApi} token={token} me={me} />}
+        {mainTab === "home" && <HomeTab authedApi={authedApi} token={token} me={me} unread={notifUnread} onOpenNotifications={() => setNotifOpen(true)} />}
         {mainTab === "chats" && (
           <ChatsTab
             authedApi={authedApi}
             onOpen={openRoom}
             onOpenVoice={openVoiceRoom}
             refreshKey={roomsRefreshKey}
+            unread={notifUnread}
+            onOpenNotifications={() => setNotifOpen(true)}
           />
         )}
         {mainTab === "discover" && (
@@ -1066,6 +1091,13 @@ function AppRoot() {
         )}
       </View>
       <TabBar active={mainTab} onChange={setMainTab} incomingCount={incomingCount} />
+      <NotificationsModal
+        visible={notifOpen}
+        authedApi={authedApi}
+        onClose={() => { setNotifOpen(false); refreshUnread(); }}
+        onUnreadChange={setNotifUnread}
+        onOpenItem={(n) => { setNotifOpen(false); openFromNotification(n); }}
+      />
     </SafeAreaView>
   );
 }
@@ -1339,7 +1371,7 @@ function ChatHeaderActions({ room, authedApi, onMembersAdded, onShare }) {
   );
 }
 
-function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey }) {
+function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOpenNotifications }) {
   const [subTab, setSubTab] = useState("direct"); // direct | rooms | voice
   const [rooms, setRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(true);
@@ -1396,8 +1428,16 @@ function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey }) {
 
   return (
     <View style={{ flex: 1 }}>
-      <View style={styles.header}>
+      <View style={[styles.header, styles.profileHeaderRow]}>
         <Text style={styles.titleSmall}>Chats</Text>
+        <Pressable style={styles.gearButton} onPress={onOpenNotifications} hitSlop={8}>
+          <Ionicons name={unread > 0 ? "notifications" : "notifications-outline"} size={19} color={C.text} />
+          {unread > 0 && (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>{unread > 99 ? "99+" : unread}</Text>
+            </View>
+          )}
+        </Pressable>
       </View>
 
       <View style={styles.segmented}>
@@ -2076,7 +2116,106 @@ function EditPostModal({ visible, post, token, authedApi, onClose, onSaved }) {
   );
 }
 
-function HomeTab({ authedApi, token, me }) {
+const NOTIF_ICONS = { message: "chatbubble", friend_request: "person-add", friend_accept: "people", post_like: "heart", post_comment: "chatbubble-ellipses" };
+
+// The notification inbox (opened from the bell on Home). Everything stays
+// here until the person deletes it; unread ones carry a dot until opened.
+function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpenItem }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await authedApi("/api/notifications");
+      if (!res.ok) return;
+      const data = await res.json();
+      setItems(data.notifications || []);
+      onUnreadChange(data.unreadCount || 0);
+    } catch (_) {
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { if (visible) load(); }, [visible]);
+
+  async function markAllRead() {
+    setItems((old) => old.map((n) => ({ ...n, read: true })));
+    onUnreadChange(0);
+    try { await authedApi("/api/notifications/read", { method: "POST", body: JSON.stringify({ all: true }) }); } catch (_) {}
+  }
+  async function open(n) {
+    if (!n.read) {
+      setItems((old) => old.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+      onUnreadChange(Math.max(0, items.filter((x) => !x.read).length - 1));
+      authedApi("/api/notifications/read", { method: "POST", body: JSON.stringify({ ids: [n.id] }) }).catch(() => {});
+    }
+    onOpenItem(n);
+  }
+  async function remove(n) {
+    setItems((old) => old.filter((x) => x.id !== n.id));
+    if (!n.read) onUnreadChange(Math.max(0, items.filter((x) => !x.read).length - 1));
+    try { await authedApi(`/api/notifications/${n.id}`, { method: "DELETE" }); } catch (_) {}
+  }
+  async function clearAll() {
+    setItems([]);
+    onUnreadChange(0);
+    try { await authedApi("/api/notifications", { method: "DELETE" }); } catch (_) {}
+  }
+
+  const hasUnread = items.some((n) => !n.read);
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+        <View style={[styles.header, styles.profileHeaderRow]}>
+          <Pressable onPress={onClose} hitSlop={10} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Ionicons name="chevron-back" size={22} color={C.text} />
+            <Text style={styles.titleSmall}>Notifications</Text>
+          </Pressable>
+          {items.length > 0 && (
+            <View style={{ flexDirection: "row", gap: 16 }}>
+              {hasUnread && (
+                <Pressable onPress={markAllRead} hitSlop={8}><Text style={styles.bioEditLabel}>Mark all read</Text></Pressable>
+              )}
+              <Pressable onPress={() => setConfirmClear(true)} hitSlop={8}><Text style={[styles.bioEditLabel, { color: C.textMuted }]}>Clear all</Text></Pressable>
+            </View>
+          )}
+        </View>
+        <FlatList
+          data={items}
+          keyExtractor={(n) => n.id}
+          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}
+          ListEmptyComponent={loading ? <ActivityIndicator style={{ marginTop: 40 }} /> : <Text style={styles.empty}>You're all caught up.{"\n"}Likes, comments, messages and friend requests will show up here.</Text>}
+          renderItem={({ item: n }) => (
+            <Pressable style={[styles.notifRow, !n.read && styles.notifRowUnread]} onPress={() => open(n)}>
+              <View style={[styles.notifIcon, { backgroundColor: n.kind === "post_like" ? "#E5484D" : C.accent }]}>
+                <Ionicons name={NOTIF_ICONS[n.kind] || "notifications"} size={17} color={C.white} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.messageUser} numberOfLines={1}>{n.title}</Text>
+                <Text style={styles.messageText} numberOfLines={2}>{n.body}</Text>
+                <Text style={[styles.time, { alignSelf: "flex-start", marginTop: 4 }]}>{timeAgo(n.createdAt)}</Text>
+              </View>
+              {!n.read && <View style={styles.notifDot} />}
+              <Pressable onPress={() => remove(n)} hitSlop={10} style={{ padding: 6, marginLeft: 4 }}>
+                <Ionicons name="close" size={18} color={C.textMuted} />
+              </Pressable>
+            </Pressable>
+          )}
+        />
+        <ActionSheet
+          visible={confirmClear}
+          title="Delete all notifications?"
+          actions={[{ label: "Clear all", icon: "trash-outline", destructive: true, onPress: clearAll }]}
+          onClose={() => setConfirmClear(false)}
+        />
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
   const [posts, setPosts] = useState([]);
   const [text, setText] = useState("");
   const [pendingMedia, setPendingMedia] = useState(null); // { url, mimeType, fileName }
@@ -2164,8 +2303,16 @@ function HomeTab({ authedApi, token, me }) {
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}>
-      <View style={styles.header}>
+      <View style={[styles.header, styles.profileHeaderRow]}>
         <Text style={styles.titleSmall}>Home</Text>
+        <Pressable style={styles.gearButton} onPress={onOpenNotifications} hitSlop={8}>
+          <Ionicons name={unread > 0 ? "notifications" : "notifications-outline"} size={19} color={C.text} />
+          {unread > 0 && (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>{unread > 99 ? "99+" : unread}</Text>
+            </View>
+          )}
+        </Pressable>
       </View>
       <FlatList
         contentContainerStyle={{ padding: 16, paddingTop: 0 }}
@@ -3045,6 +3192,12 @@ function buildStyles(C) {
   statLabel: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   divider: { height: 1, backgroundColor: C.border, marginTop: 20 },
   postMenuBtn: { padding: 6, marginLeft: 4 },
+  bellBadge: { position: "absolute", top: -6, right: -6, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4, backgroundColor: "#E5484D", alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: C.bg },
+  bellBadgeText: { color: "#fff", fontSize: 10, fontWeight: "900" },
+  notifRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 16, marginBottom: 8, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  notifRowUnread: { borderColor: C.accent },
+  notifIcon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  notifDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: C.accent },
   sheetRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 14, paddingHorizontal: 8 },
   sheetRowText: { color: C.text, fontSize: 16, fontWeight: "700" },
   postActionsRow: { flexDirection: "row", alignItems: "center", marginTop: 10, gap: 18 },
