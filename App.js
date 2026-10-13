@@ -1919,7 +1919,7 @@ function CommentsModal({ visible, post, me, authedApi, onClose, onChanged }) {
 
 // Feed photo at its own proportions (clamped to Instagram's 4:5 .. 1.91:1),
 // full width. Double-tap to like.
-function PostImage({ uri, knownRatio, onDoubleTap }) {
+function PostImage({ uri, knownRatio, onDoubleTap, overlays }) {
   const [ratio, setRatio] = useState(knownRatio || 1);
   const lastTap = useRef(0);
   useEffect(() => {
@@ -1932,6 +1932,7 @@ function PostImage({ uri, knownRatio, onDoubleTap }) {
   return (
     <Pressable onPress={() => { const now = Date.now(); if (now - lastTap.current < 300) onDoubleTap && onDoubleTap(); lastTap.current = now; }}>
       <Image source={{ uri }} style={{ width: FEED_W, height: FEED_W / r, backgroundColor: C.surfaceRaised }} resizeMode="cover" />
+      <OverlayLayer overlays={overlays} W={FEED_W} H={FEED_W / r} />
     </Pressable>
   );
 }
@@ -1975,11 +1976,21 @@ function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged })
           </Pressable>
         )}
       </View>
+      {item.music && <PostMusicBar music={item.music} />}
       {item.media && (
         item.media.mimeType?.startsWith("video/") ? (
-          <MediaVideo uri={item.media.url} style={{ width: FEED_W, aspectRatio: item.media.width && item.media.height ? Math.min(1.91, Math.max(0.8, item.media.width / item.media.height)) : 1, backgroundColor: "#000" }} />
+          (() => {
+            const vr = item.media.width && item.media.height ? Math.min(1.91, Math.max(0.8, item.media.width / item.media.height)) : 1;
+            return (
+              <View style={{ width: FEED_W, height: FEED_W / vr, backgroundColor: "#000" }}>
+                <MediaVideo uri={item.media.url} style={{ width: FEED_W, height: FEED_W / vr }} />
+                <OverlayLayer overlays={item.overlays} W={FEED_W} H={FEED_W / vr} />
+              </View>
+            );
+          })()
         ) : (
           <PostImage
+            overlays={item.overlays}
             uri={item.media.url}
             knownRatio={item.media.width && item.media.height ? item.media.width / item.media.height : undefined}
             onDoubleTap={() => { if (!item.likedByMe) toggleLike(); }}
@@ -2533,9 +2544,11 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
   const [edited, setEdited] = useState(null); // ready-to-upload result
   const [caption, setCaption] = useState("");
   const [sharing, setSharing] = useState(false);
+  const [overlays, setOverlays] = useState([]); // text stickers on the photo
+  const [music, setMusic] = useState(null); // 30s song clip
 
   useEffect(() => {
-    if (visible) { setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); }
+    if (visible) { setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); }
   }, [visible]);
 
   async function pick(kind) {
@@ -2561,7 +2574,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
     try {
       const uploaded = await uploadAsset(token, { uri: edited.uri, fileName: edited.fileName, mimeType: edited.mimeType });
       const media = { ...uploaded, width: edited.width || undefined, height: edited.height || undefined };
-      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: caption.trim(), media }) });
+      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: isStory ? "" : caption.trim(), media, music, overlays: overlays.filter((o) => o.text.trim()) }) });
       if (res.status === 401) return;
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return Alert.alert("Couldn't share", data.error || "Something went wrong.");
@@ -2607,7 +2620,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
             aspects={isStory ? STORY_ASPECTS : POST_ASPECTS}
             title="Edit photo"
             onBack={() => setStep("pick")}
-            onNext={(out) => { setEdited(out); setStep("caption"); }}
+            onNext={(out) => { setEdited(out); setStep("decorate"); }}
           />
         )}
 
@@ -2616,7 +2629,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
             <View style={[styles.header, styles.profileHeaderRow]}>
               <Pressable onPress={() => setStep("pick")} hitSlop={10}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
               <Text style={styles.titleSmall}>Preview video</Text>
-              <Pressable onPress={() => setStep("caption")} hitSlop={10}><Text style={styles.headerAction}>Next</Text></Pressable>
+              <Pressable onPress={() => setStep("decorate")} hitSlop={10}><Text style={styles.headerAction}>Next</Text></Pressable>
             </View>
             <View style={{ alignItems: "center", marginTop: 8 }}>
               <MediaVideo uri={asset.uri} style={{ width: EDIT_W, aspectRatio: videoRatio, backgroundColor: "#000", borderRadius: 4 }} />
@@ -2627,11 +2640,27 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
           </View>
         )}
 
-        {step === "caption" && edited && (
+        {step === "decorate" && edited && (
+          <DecorateStep
+            edited={edited}
+            overlays={overlays}
+            setOverlays={setOverlays}
+            music={music}
+            setMusic={setMusic}
+            authedApi={authedApi}
+            title={isStory ? "Add to story" : "Text & music"}
+            nextLabel={isStory ? "Share" : "Next"}
+            busy={sharing}
+            onBack={() => setStep("edit")}
+            onNext={() => (isStory ? share() : setStep("caption"))}
+          />
+        )}
+
+        {step === "caption" && edited && !isStory && (
           <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
             <View style={[styles.header, styles.profileHeaderRow]}>
-              <Pressable onPress={() => setStep("edit")} hitSlop={10} disabled={sharing}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
-              <Text style={styles.titleSmall}>{isStory ? "Add to story" : "New post"}</Text>
+              <Pressable onPress={() => setStep("decorate")} hitSlop={10} disabled={sharing}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
+              <Text style={styles.titleSmall}>New post</Text>
               <Pressable onPress={share} disabled={sharing} hitSlop={10}>
                 {sharing ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>Share</Text>}
               </Pressable>
@@ -2647,10 +2676,10 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
                   style={[styles.input, { flex: 1, minHeight: 90, textAlignVertical: "top", marginBottom: 0 }]}
                   value={caption}
                   onChangeText={setCaption}
-                  placeholder={isStory ? "Add a caption (optional)" : "Write a caption..."}
+                  placeholder="Write a caption..."
                   placeholderTextColor={C.textFaint}
                   multiline
-                  maxLength={isStory ? 500 : 2000}
+                  maxLength={2000}
                   autoFocus={Platform.OS === "web"}
                 />
               </View>
@@ -2660,6 +2689,309 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
         )}
       </SafeAreaView>
     </Modal>
+  );
+}
+
+// ===================== Music + text on photos =====================
+const TEXT_COLORS = ["#FFFFFF", "#000000", "#FF4D4F", "#FFC53D", "#52C41A", "#40A9FF", "#F759AB"];
+function isLightColor(hex) {
+  const n = parseInt(String(hex).replace("#", ""), 16) || 0;
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160;
+}
+function overlayTextStyle(o, W) {
+  const fs = Math.max(10, W * 0.07 * (o.scale || 1));
+  const box = o.style === "box";
+  return {
+    fontSize: fs,
+    fontWeight: "800",
+    textAlign: "center",
+    color: box ? (isLightColor(o.color) ? "#000" : "#fff") : o.color,
+    ...(box
+      ? { backgroundColor: o.color, paddingHorizontal: fs * 0.35, paddingVertical: fs * 0.12, borderRadius: fs * 0.25, overflow: "hidden" }
+      : { textShadowColor: "rgba(0,0,0,0.65)", textShadowRadius: 4, textShadowOffset: { width: 0, height: 1 } }),
+  };
+}
+// Where a text sticker sits inside a W x H frame. x/y are fractions (x = centre).
+function overlayWrapStyle(o, W, H) {
+  const fs = Math.max(10, W * 0.07 * (o.scale || 1));
+  return { position: "absolute", left: 0, width: W, top: o.y * H - fs, alignItems: "center", paddingHorizontal: W * 0.04, transform: [{ translateX: (o.x - 0.5) * W }] };
+}
+
+// Read-only text stickers over a photo/video (feed, story viewer, previews).
+function OverlayLayer({ overlays, W, H }) {
+  if (!overlays || !overlays.length) return null;
+  return (
+    <View pointerEvents="none" style={{ position: "absolute", left: 0, top: 0, width: W, height: H, overflow: "hidden" }}>
+      {overlays.map((o) => (
+        <View key={o.id} style={overlayWrapStyle(o, W, H)}>
+          <Text style={overlayTextStyle(o, W)}>{o.text}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// One draggable sticker in the editor. Drag to move; tap to edit.
+function DraggableOverlay({ o, W, H, selected, onMove, onTap }) {
+  const ref = useRef({});
+  ref.current = { o, W, H, onMove, onTap };
+  const start = useRef({ x: 0, y: 0 });
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => { start.current = { x: ref.current.o.x, y: ref.current.o.y }; },
+      onPanResponderMove: (_, g) => {
+        const { W: w, H: h } = ref.current;
+        ref.current.onMove(ref.current.o.id, {
+          x: Math.min(1, Math.max(0, start.current.x + g.dx / w)),
+          y: Math.min(1, Math.max(0, start.current.y + g.dy / h)),
+        });
+      },
+      onPanResponderRelease: (_, g) => { if (Math.abs(g.dx) < 5 && Math.abs(g.dy) < 5) ref.current.onTap(ref.current.o.id); },
+    })
+  ).current;
+  return (
+    <View pointerEvents="box-none" style={overlayWrapStyle(o, W, H)}>
+      <View {...pan.panHandlers} style={selected ? { borderWidth: 1, borderColor: "rgba(255,255,255,0.9)", borderStyle: "dashed", borderRadius: 6, padding: 2 } : { padding: 3 }}>
+        <Text style={overlayTextStyle(o, W)}>{o.text || " "}</Text>
+      </View>
+    </View>
+  );
+}
+
+// ---- Music ----
+function MusicPill({ music, onRemove, onPress, light }) {
+  return (
+    <Pressable style={[styles.musicPill, light && styles.musicPillDark]} onPress={onPress} disabled={!onPress}>
+      {music.artworkUrl ? <Image source={{ uri: music.artworkUrl }} style={styles.musicArt} /> : <Ionicons name="musical-notes" size={16} color={light ? "#fff" : C.text} />}
+      <Text style={[styles.musicPillText, light && { color: "#fff" }]} numberOfLines={1}>{music.title}{music.artist ? ` · ${music.artist}` : ""}</Text>
+      {onRemove && (
+        <Pressable onPress={onRemove} hitSlop={8}><Ionicons name="close" size={16} color={light ? "#fff" : C.textMuted} /></Pressable>
+      )}
+    </Pressable>
+  );
+}
+
+// Search Apple's catalogue (through our backend) and pick a 30-second clip.
+function MusicPicker({ visible, authedApi, onClose, onPick }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [playingId, setPlayingId] = useState(null);
+  const player = useVideoPlayer(null, (p) => { if (p) p.loop = false; });
+
+  useEffect(() => {
+    if (!visible) { try { player.pause(); } catch (_) {} setPlayingId(null); setQuery(""); setResults([]); setError(""); }
+  }, [visible]);
+
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) { setResults([]); setError(""); return; }
+    setLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const res = await authedApi(`/api/music/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { setError(data.error || "Search failed."); setResults([]); }
+        else { setError(""); setResults(data.results || []); }
+      } catch (_) { setError("Check your connection and try again."); }
+      finally { setLoading(false); }
+    }, 450);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  function togglePreview(t) {
+    try {
+      if (playingId === t.trackId) { player.pause(); setPlayingId(null); return; }
+      player.replace(t.previewUrl);
+      player.play();
+      setPlayingId(t.trackId);
+    } catch (_) {}
+  }
+  function choose(t) {
+    try { player.pause(); } catch (_) {}
+    onPick({ trackId: t.trackId, title: t.title, artist: t.artist, artworkUrl: t.artworkUrl, previewUrl: t.previewUrl });
+    onClose();
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+        <View style={[styles.header, styles.profileHeaderRow]}>
+          <Pressable onPress={onClose} hitSlop={10}><Ionicons name="close" size={26} color={C.text} /></Pressable>
+          <Text style={styles.titleSmall}>Add music</Text>
+          <View style={{ width: 26 }} />
+        </View>
+        <View style={{ paddingHorizontal: 16 }}>
+          <View style={styles.searchBox}>
+            <Ionicons name="search" size={18} color={C.textMuted} />
+            <TextInput
+              style={[styles.inputInline, { marginLeft: 8 }]}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search songs or artists"
+              placeholderTextColor={C.textFaint}
+              autoFocus
+              returnKeyType="search"
+            />
+            {loading && <ActivityIndicator size="small" />}
+          </View>
+        </View>
+        <FlatList
+          data={results}
+          keyExtractor={(t) => t.trackId}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ padding: 16 }}
+          ListEmptyComponent={
+            <Text style={styles.empty}>
+              {error || (query.trim() ? (loading ? "" : "No songs found.") : "Search for a song to play a 30-second clip with your post.")}
+            </Text>
+          }
+          renderItem={({ item: t }) => (
+            <Pressable style={styles.songRow} onPress={() => choose(t)}>
+              {t.artworkUrl ? <Image source={{ uri: t.artworkUrl }} style={styles.songArt} /> : <View style={[styles.songArt, { alignItems: "center", justifyContent: "center" }]}><Ionicons name="musical-notes" size={20} color={C.textMuted} /></View>}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.messageUser} numberOfLines={1}>{t.title}</Text>
+                <Text style={styles.roomInfo} numberOfLines={1}>{t.artist}</Text>
+              </View>
+              <Pressable style={styles.songPlay} onPress={() => togglePreview(t)} hitSlop={8}>
+                <Ionicons name={playingId === t.trackId ? "pause" : "play"} size={18} color={C.white} />
+              </Pressable>
+            </Pressable>
+          )}
+        />
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// Music line on a post in the feed: tap to play/pause the 30s clip.
+function PostMusicBar({ music }) {
+  const player = useVideoPlayer(music.previewUrl, (p) => { if (p) p.loop = true; });
+  const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player?.playing || false });
+  return (
+    <Pressable style={styles.postMusicBar} onPress={() => (isPlaying ? player.pause() : player.play())}>
+      <Ionicons name="musical-notes" size={14} color={C.text} />
+      <Text style={styles.postMusicText} numberOfLines={1}>{music.title}{music.artist ? ` · ${music.artist}` : ""}</Text>
+      <Ionicons name={isPlaying ? "pause-circle" : "play-circle"} size={22} color={C.accent} />
+    </Pressable>
+  );
+}
+
+// Plays a story's song while that story is on screen.
+function StoryMusic({ music }) {
+  const player = useVideoPlayer(music.previewUrl, (p) => { if (p) { p.loop = true; p.play(); } });
+  return <MusicPill music={music} light onPress={() => (player.playing ? player.pause() : player.play())} />;
+}
+
+// Step between editing the photo and posting: add text stickers and music.
+function DecorateStep({ edited, overlays, setOverlays, music, setMusic, authedApi, title, nextLabel, busy, onBack, onNext }) {
+  const [selectedId, setSelectedId] = useState(null);
+  const [musicOpen, setMusicOpen] = useState(false);
+  const ratio = Math.min(2, Math.max(0.5, (edited.width && edited.height) ? edited.width / edited.height : 1));
+  const maxH = SCREEN_HEIGHT * 0.5;
+  let fw = EDIT_W;
+  let fh = fw / ratio;
+  if (fh > maxH) { fh = maxH; fw = fh * ratio; }
+  const selected = overlays.find((o) => o.id === selectedId) || null;
+
+  function addText() {
+    const o = { id: `t_${Date.now()}`, text: "", color: "#FFFFFF", style: "plain", x: 0.5, y: 0.4, scale: 1 };
+    setOverlays([...overlays, o]);
+    setSelectedId(o.id);
+  }
+  function patch(id, p) { setOverlays((old) => old.map((o) => (o.id === id ? { ...o, ...p } : o))); }
+  function done() {
+    // An empty text sticker is just removed.
+    if (selected && !selected.text.trim()) setOverlays(overlays.filter((o) => o.id !== selected.id));
+    setSelectedId(null);
+  }
+  function removeSelected() {
+    setOverlays(overlays.filter((o) => o.id !== selectedId));
+    setSelectedId(null);
+  }
+
+  return (
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <View style={[styles.header, styles.profileHeaderRow]}>
+        <Pressable onPress={onBack} hitSlop={10}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
+        <Text style={styles.titleSmall}>{title}</Text>
+        <Pressable onPress={() => { done(); onNext(); }} disabled={busy} hitSlop={10}>
+          {busy ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>{nextLabel}</Text>}
+        </Pressable>
+      </View>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ alignItems: "center", paddingBottom: 30 }}>
+        <View style={{ width: fw, height: fh, marginTop: 8, backgroundColor: "#000", overflow: "hidden" }}>
+          {edited.type === "video" ? (
+            <MediaVideo uri={edited.uri} style={{ width: fw, height: fh }} controls={false} />
+          ) : (
+            <Image source={{ uri: edited.uri }} style={{ width: fw, height: fh }} resizeMode="cover" />
+          )}
+          <View pointerEvents="box-none" style={{ position: "absolute", left: 0, top: 0, width: fw, height: fh }}>
+            {overlays.map((o) => (
+              <DraggableOverlay key={o.id} o={o} W={fw} H={fh} selected={o.id === selectedId} onMove={patch} onTap={setSelectedId} />
+            ))}
+          </View>
+        </View>
+
+        <View style={styles.decorateBar}>
+          <Pressable style={styles.decorateBtn} onPress={addText}>
+            <Text style={styles.decorateAa}>Aa</Text>
+            <Text style={styles.editToolText}>Text</Text>
+          </Pressable>
+          <Pressable style={styles.decorateBtn} onPress={() => setMusicOpen(true)}>
+            <Ionicons name="musical-notes-outline" size={22} color={C.text} />
+            <Text style={styles.editToolText}>Music</Text>
+          </Pressable>
+        </View>
+        {music && (
+          <View style={{ marginTop: 10, maxWidth: EDIT_W }}>
+            <MusicPill music={music} onRemove={() => setMusic(null)} />
+          </View>
+        )}
+        {!selected && overlays.length > 0 && <Text style={[styles.roomInfo, { marginTop: 10 }]}>Drag text to move it. Tap to edit.</Text>}
+
+        {selected && (
+          <View style={[styles.textPanel, { width: EDIT_W }]}>
+            <TextInput
+              style={[styles.input, { marginBottom: 10 }]}
+              value={selected.text}
+              onChangeText={(t) => patch(selected.id, { text: t })}
+              placeholder="Type something..."
+              placeholderTextColor={C.textFaint}
+              maxLength={200}
+              multiline
+              autoFocus
+            />
+            <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+              {TEXT_COLORS.map((c) => (
+                <Pressable key={c} onPress={() => patch(selected.id, { color: c })} style={[styles.colorDot, { backgroundColor: c }, selected.color === c && styles.colorDotActive]} />
+              ))}
+            </View>
+            <View style={styles.textPanelRow}>
+              <Pressable style={[styles.editChip, selected.style === "plain" && styles.editChipActive]} onPress={() => patch(selected.id, { style: "plain" })}>
+                <Text style={[styles.editChipText, selected.style === "plain" && { color: C.white }]}>Plain</Text>
+              </Pressable>
+              <Pressable style={[styles.editChip, selected.style === "box" && styles.editChipActive]} onPress={() => patch(selected.id, { style: "box" })}>
+                <Text style={[styles.editChipText, selected.style === "box" && { color: C.white }]}>Box</Text>
+              </Pressable>
+              <View style={{ flex: 1 }} />
+              <Pressable style={styles.zoomBtn} onPress={() => patch(selected.id, { scale: Math.max(0.5, +(selected.scale - 0.2).toFixed(2)) })}><Ionicons name="remove" size={20} color={C.text} /></Pressable>
+              <Pressable style={styles.zoomBtn} onPress={() => patch(selected.id, { scale: Math.min(3, +(selected.scale + 0.2).toFixed(2)) })}><Ionicons name="add" size={20} color={C.text} /></Pressable>
+            </View>
+            <View style={styles.textPanelRow}>
+              <Pressable onPress={removeSelected} hitSlop={8}><Text style={{ color: C.danger || "#E5484D", fontWeight: "800" }}>Delete</Text></Pressable>
+              <View style={{ flex: 1 }} />
+              <Pressable style={styles.smallButton} onPress={done}><Text style={styles.buttonText}>Done</Text></Pressable>
+            </View>
+          </View>
+        )}
+      </ScrollView>
+      <MusicPicker visible={musicOpen} authedApi={authedApi} onClose={() => setMusicOpen(false)} onPick={setMusic} />
+    </KeyboardAvoidingView>
   );
 }
 
@@ -2723,6 +3055,7 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
   const [tick, setTick] = useState(0);
   const [vidDur, setVidDur] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [box, setBox] = useState({ w: 1, h: 1 });
   const progress = useRef(new Animated.Value(0)).current;
   const group = groups[gi];
   const story = group?.stories[si];
@@ -2773,11 +3106,23 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
       <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }} edges={["top", "bottom"]}>
         <View style={{ flex: 1, alignItems: "center" }}>
           <View style={{ flex: 1, width: "100%", maxWidth: 480 }}>
-            {isVideo ? (
-              <StoryVideo key={story.id} uri={story.media.url} onDuration={setVidDur} />
-            ) : (
-              <Image source={{ uri: story.media?.url }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-            )}
+            <View style={StyleSheet.absoluteFill} onLayout={(e) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
+              {(() => {
+                const r = story.media?.width && story.media?.height ? story.media.width / story.media.height : 9 / 16;
+                let fw = box.w, fh = box.w / r;
+                if (fh > box.h) { fh = box.h; fw = box.h * r; }
+                return (
+                  <View style={{ position: "absolute", left: (box.w - fw) / 2, top: (box.h - fh) / 2, width: fw, height: fh, overflow: "hidden" }}>
+                    {isVideo ? (
+                      <StoryVideo key={story.id} uri={story.media.url} onDuration={setVidDur} />
+                    ) : (
+                      <Image source={{ uri: story.media?.url }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                    )}
+                    <OverlayLayer overlays={story.overlays} W={fw} H={fh} />
+                  </View>
+                );
+              })()}
+            </View>
             <View style={{ position: "absolute", left: 0, right: 0, top: 0, bottom: 0, flexDirection: "row" }}>
               <Pressable style={{ flex: 1 }} onPress={prev} />
               <Pressable style={{ flex: 2 }} onPress={next} />
@@ -2805,6 +3150,11 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
                 </Pressable>
               </View>
             </View>
+            {story.music && (
+              <View pointerEvents="box-none" style={styles.storyMusicWrap}>
+                <StoryMusic key={story.id} music={story.music} />
+              </View>
+            )}
             {(!!story.text || isMine) && (
               <View pointerEvents="none" style={styles.storyBottom}>
                 {!!story.text && <Text style={styles.storyCaption}>{story.text}</Text>}
@@ -3656,6 +4006,23 @@ function buildStyles(C) {
   statLabel: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   divider: { height: 1, backgroundColor: C.border, marginTop: 20 },
   postMenuBtn: { padding: 6, marginLeft: 4 },
+  musicPill: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 20, backgroundColor: C.surfaceRaised, alignSelf: "flex-start", maxWidth: "100%" },
+  musicPillDark: { backgroundColor: "rgba(0,0,0,0.55)" },
+  musicArt: { width: 22, height: 22, borderRadius: 4 },
+  musicPillText: { color: C.text, fontSize: 13, fontWeight: "700", flexShrink: 1 },
+  storyMusicWrap: { position: "absolute", left: 12, top: 88 },
+  postMusicBar: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingBottom: 8, marginTop: -2 },
+  postMusicText: { color: C.text, fontSize: 13, flex: 1 },
+  songRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 8 },
+  songArt: { width: 52, height: 52, borderRadius: 8, backgroundColor: C.surfaceRaised },
+  songPlay: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accent, alignItems: "center", justifyContent: "center" },
+  decorateBar: { flexDirection: "row", gap: 28, marginTop: 16 },
+  decorateBtn: { alignItems: "center", gap: 4, minWidth: 56 },
+  decorateAa: { color: C.text, fontSize: 21, fontWeight: "900" },
+  textPanel: { marginTop: 14, padding: 14, borderRadius: 16, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  textPanelRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
+  colorDot: { width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: C.border },
+  colorDotActive: { borderWidth: 3, borderColor: C.accent },
   brandTitle: { color: C.text, fontSize: 26, fontWeight: "900", letterSpacing: 1, textAlign: "center" },
   headerAction: { color: C.accent, fontSize: 16, fontWeight: "800" },
   storiesWrap: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border, marginBottom: 6 },
