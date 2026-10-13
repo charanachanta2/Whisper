@@ -19,6 +19,7 @@ import {
   Appearance,
   ScrollView,
   PanResponder,
+  Easing,
 } from "react-native";
 // react-native core's SafeAreaView is iOS-only (it's a no-op on Android),
 // which is why the header/status bar area could overlap system content on
@@ -115,6 +116,7 @@ const THEME_KEY = "music_chat_theme";
 // Remembers that the one-time "turn on notifications" pop-up was already shown.
 const PUSH_PROMPT_KEY = "music_chat_push_prompted";
 const SCREEN_WIDTH = Dimensions.get("window").width;
+const SCREEN_HEIGHT = Dimensions.get("window").height;
 
 // Shared adaptive image renderer used everywhere a shared photo shows up
 // (chat bubbles and Home posts). Attachments used to render at a fixed
@@ -1915,6 +1917,25 @@ function CommentsModal({ visible, post, me, authedApi, onClose, onChanged }) {
   );
 }
 
+// Feed photo at its own proportions (clamped to Instagram's 4:5 .. 1.91:1),
+// full width. Double-tap to like.
+function PostImage({ uri, knownRatio, onDoubleTap }) {
+  const [ratio, setRatio] = useState(knownRatio || 1);
+  const lastTap = useRef(0);
+  useEffect(() => {
+    if (!uri || knownRatio) return;
+    let cancelled = false;
+    Image.getSize(uri, (w, h) => { if (!cancelled && w > 0 && h > 0) setRatio(w / h); }, () => {});
+    return () => { cancelled = true; };
+  }, [uri, knownRatio]);
+  const r = Math.min(1.91, Math.max(0.8, ratio));
+  return (
+    <Pressable onPress={() => { const now = Date.now(); if (now - lastTap.current < 300) onDoubleTap && onDoubleTap(); lastTap.current = now; }}>
+      <Image source={{ uri }} style={{ width: FEED_W, height: FEED_W / r, backgroundColor: C.surfaceRaised }} resizeMode="cover" />
+    </Pressable>
+  );
+}
+
 // A single post, shared by the Home feed and the Profile tab. The owner gets
 // a three-dot menu (Edit / Delete); everyone gets Like and Comment.
 // onChanged(post) receives the server's updated copy after a like/comment.
@@ -1944,44 +1965,50 @@ function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged })
   }
 
   return (
-    <View style={styles.postCard}>
-      <View style={styles.postHeader}>
-        <UserAvatar name={item.userName} avatarUrl={item.userAvatarUrl} thumbUrl={item.userAvatarThumbUrl} size={24} style={{ marginRight: 8 }} />
-        <Text style={[styles.messageUser, { flex: 1 }]}>{item.userName}</Text>
+    <View style={styles.igPost}>
+      <View style={styles.igHeader}>
+        <UserAvatar name={item.userName} avatarUrl={item.userAvatarUrl} thumbUrl={item.userAvatarThumbUrl} size={34} style={{ marginRight: 10 }} />
+        <Text style={[styles.igName, { flex: 1 }]} numberOfLines={1}>{item.userName}</Text>
         {isOwner && (
           <Pressable onPress={() => setMenuOpen(true)} hitSlop={10} style={styles.postMenuBtn}>
-            <Ionicons name="ellipsis-horizontal" size={18} color={C.textMuted} />
+            <Ionicons name="ellipsis-horizontal" size={20} color={C.text} />
           </Pressable>
         )}
       </View>
-      {!!item.text && <Text style={styles.messageText}>{item.text}</Text>}
       {item.media && (
         item.media.mimeType?.startsWith("video/") ? (
-          <PostVideo uri={item.media.url} />
+          <MediaVideo uri={item.media.url} style={{ width: FEED_W, aspectRatio: item.media.width && item.media.height ? Math.min(1.91, Math.max(0.8, item.media.width / item.media.height)) : 1, backgroundColor: "#000" }} />
         ) : (
-          <AdaptiveImage
+          <PostImage
             uri={item.media.url}
             knownRatio={item.media.width && item.media.height ? item.media.width / item.media.height : undefined}
-            maxWidth={SCREEN_WIDTH - 64}
-            maxHeight={420}
-            minHeight={160}
-            style={styles.postMediaImage}
-            onPress={() => Linking.openURL(item.media.url)}
+            onDoubleTap={() => { if (!item.likedByMe) toggleLike(); }}
           />
         )
       )}
-      <View style={styles.postActionsRow}>
-        <Pressable style={styles.postAction} onPress={toggleLike} hitSlop={8}>
-          <Ionicons name={item.likedByMe ? "heart" : "heart-outline"} size={22} color={item.likedByMe ? "#E5484D" : C.textMuted} />
-          <Text style={styles.postActionText}>{item.likeCount || 0}</Text>
+      <View style={styles.igActions}>
+        <Pressable style={styles.igAction} onPress={toggleLike} hitSlop={8}>
+          <Ionicons name={item.likedByMe ? "heart" : "heart-outline"} size={28} color={item.likedByMe ? "#E5484D" : C.text} />
         </Pressable>
-        <Pressable style={styles.postAction} onPress={() => setCommentsOpen(true)} hitSlop={8}>
-          <Ionicons name="chatbubble-outline" size={20} color={C.textMuted} />
-          <Text style={styles.postActionText}>{item.commentCount || 0}</Text>
+        <Pressable style={styles.igAction} onPress={() => setCommentsOpen(true)} hitSlop={8}>
+          <Ionicons name="chatbubble-outline" size={25} color={C.text} />
         </Pressable>
-        <Text style={[styles.time, { marginTop: 0, marginLeft: "auto" }]}>
-          {new Date(item.createdAt).toLocaleString()}
-          {item.editedAt ? <Text style={styles.editedTag}> · Edited</Text> : null}
+      </View>
+      <View style={styles.igBody}>
+        {(item.likeCount || 0) > 0 && <Text style={styles.igLikes}>{item.likeCount} {item.likeCount === 1 ? "like" : "likes"}</Text>}
+        {!!item.text && (
+          <Text style={styles.igCaption}>
+            <Text style={styles.igName}>{item.userName}</Text>  {item.text}
+          </Text>
+        )}
+        {(item.commentCount || 0) > 0 && (
+          <Pressable onPress={() => setCommentsOpen(true)}>
+            <Text style={styles.igMuted}>View {item.commentCount === 1 ? "1 comment" : `all ${item.commentCount} comments`}</Text>
+          </Pressable>
+        )}
+        <Text style={styles.igTime}>
+          {timeAgo(item.createdAt).toUpperCase()}
+          {item.editedAt ? " · EDITED" : ""}
         </Text>
       </View>
       <ActionSheet
@@ -2221,75 +2248,28 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
 
 function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
   const [posts, setPosts] = useState([]);
-  const [text, setText] = useState("");
-  const [pendingMedia, setPendingMedia] = useState(null); // { url, mimeType, fileName }
-  const [busy, setBusy] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [stories, setStories] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [editingPost, setEditingPost] = useState(null);
+  const [creating, setCreating] = useState(null); // null | "post" | "story"
+  const [viewer, setViewer] = useState(null); // { userId }
 
   const load = async () => {
-    setLoadingPosts(true);
     try {
-      const res = await authedApi("/api/posts");
-      if (res.status === 401) return;
-      const data = await res.json();
-      setPosts(data.posts || []);
+      const [pRes, sRes] = await Promise.all([authedApi("/api/posts"), authedApi("/api/stories")]);
+      if (pRes.status === 401) return;
+      const pData = await pRes.json();
+      setPosts(pData.posts || []);
+      if (sRes.ok) setStories((await sRes.json()).stories || []);
     } catch (e) {
       Alert.alert("Could not load", "Check that the backend is reachable.");
     } finally {
       setLoadingPosts(false);
+      setRefreshing(false);
     }
   };
   useEffect(() => { load(); }, []);
-
-  async function attachMedia() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return Alert.alert("Permission needed", "Allow photo access to attach a photo or video.");
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images", "videos"], quality: 0.8 });
-    if (result.canceled) return;
-    setUploading(true);
-    try {
-      const asset = await prepareImage(result.assets[0], 1600);
-      const uploaded = await uploadAsset(token, {
-        uri: asset.uri,
-        fileName: asset.fileName || (asset.type === "video" ? "video.mp4" : "photo.jpg"),
-        mimeType: asset.mimeType || (asset.type === "video" ? "video/mp4" : "image/jpeg"),
-      });
-      setPendingMedia(uploaded);
-    } catch (e) {
-      Alert.alert("Upload failed", e.message || "Could not upload that file.");
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  async function publish() {
-    if ((!text.trim() && !pendingMedia) || busy) return;
-    setBusy(true);
-    try {
-      const res = await authedApi("/api/posts", {
-        method: "POST",
-        body: JSON.stringify({ text: text.trim(), media: pendingMedia }),
-      });
-      if (res.status === 401) return;
-      const data = await res.json();
-      if (!res.ok) return Alert.alert("Couldn't post", data.error || "Something went wrong.");
-      setText("");
-      setPendingMedia(null);
-      setPosts((old) => [data.post, ...old]);
-    } catch (e) {
-      // A network error (unreachable backend, timeout, cold-starting free
-      // server, etc.) used to fail silently here -- the button just did
-      // nothing and the post never appeared. Now the person actually finds
-      // out what happened instead of wondering why "posting" is broken.
-      Alert.alert("Couldn't post", "Check your connection and try again.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const canPost = (text.trim() || pendingMedia) && !busy;
 
   async function deletePost(post) {
     try {
@@ -2305,10 +2285,17 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
     }
   }
 
+  const groups = groupStories(stories, me);
+  const viewable = groups.filter((g) => g.stories.length > 0);
+  const viewerIndex = viewer ? viewable.findIndex((g) => g.userId === viewer.userId) : -1;
+
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}>
+    <View style={{ flex: 1 }}>
       <View style={[styles.header, styles.profileHeaderRow]}>
-        <Text style={styles.titleSmall}>Home</Text>
+        <Pressable style={styles.gearButton} onPress={() => setCreating("post")} hitSlop={8}>
+          <Ionicons name="add" size={24} color={C.text} />
+        </Pressable>
+        <Text style={styles.brandTitle}>Hush</Text>
         <Pressable style={styles.gearButton} onPress={onOpenNotifications} hitSlop={8}>
           <Ionicons name={unread > 0 ? "notifications" : "notifications-outline"} size={19} color={C.text} />
           {unread > 0 && (
@@ -2319,40 +2306,20 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
         </Pressable>
       </View>
       <FlatList
-        contentContainerStyle={{ padding: 16, paddingTop: 0 }}
-        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ paddingBottom: 24 }}
+        refreshing={refreshing}
+        onRefresh={() => { setRefreshing(true); load(); }}
         ListHeaderComponent={
-          <>
-            <Text style={styles.sectionLabel}>Share an update</Text>
-            <View style={styles.searchBox}>
-              <TextInput style={[styles.inputInline, { minHeight: 44, textAlignVertical: "top" }]} value={text} onChangeText={setText} placeholder="What's on your mind?" placeholderTextColor={C.textFaint} multiline />
-              <Pressable style={styles.iconButtonSm} onPress={attachMedia} disabled={uploading}>
-                {uploading ? <ActivityIndicator size="small" /> : <Ionicons name="image-outline" size={19} color={C.text} />}
-              </Pressable>
-              <Pressable style={[styles.smallButton, !canPost && styles.smallButtonMuted]} disabled={!canPost} onPress={publish}><Text style={[styles.buttonText, !canPost && styles.smallButtonMutedText]}>Post</Text></Pressable>
-            </View>
-            {pendingMedia && (
-              <View style={styles.mediaPreviewWrap}>
-                {pendingMedia.mimeType?.startsWith("video/") ? (
-                  <View style={[styles.mediaPreviewImage, { alignItems: "center", justifyContent: "center" }]}>
-                    <Ionicons name="videocam-outline" size={22} color={C.textMuted} />
-                  </View>
-                ) : (
-                  <Image source={{ uri: pendingMedia.url }} style={styles.mediaPreviewImage} />
-                )}
-                <Pressable style={styles.removeMediaBtn} onPress={() => setPendingMedia(null)}>
-                  <Text style={styles.removeMediaBtnText}>×</Text>
-                </Pressable>
-              </View>
-            )}
-          </>
+          <View style={styles.storiesWrap}>
+            <StoriesBar groups={groups} onView={(g) => setViewer({ userId: g.userId })} onAdd={() => setCreating("story")} />
+          </View>
         }
         data={posts}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
           <PostCard item={item} isOwner={item.userId === me?.id} me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
         )}
-        ListEmptyComponent={loadingPosts ? <ActivityIndicator style={{ marginTop: 30 }} /> : <Text style={styles.empty}>Friends' posts will appear here.</Text>}
+        ListEmptyComponent={loadingPosts ? <ActivityIndicator style={{ marginTop: 30 }} /> : <Text style={styles.empty}>Friends' posts will appear here.{"\n"}Tap + to share your first photo.</Text>}
       />
       <EditPostModal
         visible={!!editingPost}
@@ -2362,7 +2329,498 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
         onClose={() => setEditingPost(null)}
         onSaved={(updated) => setPosts((old) => old.map((p) => (p.id === updated.id ? updated : p)))}
       />
-    </KeyboardAvoidingView>
+      <CreateMediaModal
+        visible={!!creating}
+        mode={creating || "post"}
+        token={token}
+        authedApi={authedApi}
+        onClose={() => setCreating(null)}
+        onDone={(item) => {
+          if (creating === "story") setStories((old) => [...old, item]);
+          else setPosts((old) => [item, ...old]);
+        }}
+      />
+      {viewer && viewerIndex >= 0 && (
+        <StoryViewer
+          groups={viewable}
+          startIndex={viewerIndex}
+          me={me}
+          authedApi={authedApi}
+          onClose={() => setViewer(null)}
+          onViewed={(st) => setStories((old) => old.map((x) => (x.id === st.id ? { ...x, viewedByMe: true } : x)))}
+          onDeleted={(st) => setStories((old) => old.filter((x) => x.id !== st.id))}
+        />
+      )}
+    </View>
+  );
+}
+
+// ===================== Instagram-style media flow =====================
+const FEED_W = Math.min(SCREEN_WIDTH, 560);
+const EDIT_W = Math.min(SCREEN_WIDTH - 32, 420);
+
+function MediaVideo({ uri, style, controls = true }) {
+  const player = useVideoPlayer(uri, (p) => { if (p) { p.loop = false; } });
+  return <VideoView style={style} player={player} contentFit="contain" allowsFullscreen nativeControls={controls} />;
+}
+
+// Photo editor: choose a crop shape, drag/zoom inside it, rotate or flip.
+// Rendered as a normal view (not a Modal) so it can sit inside the
+// create-post / create-story flow.
+function MediaEditor({ asset, aspects, title = "Edit", nextLabel = "Next", onBack, onNext }) {
+  const [work, setWork] = useState({ uri: asset.uri, width: asset.width || 1, height: asset.height || 1 });
+  const [aspectKey, setAspectKey] = useState(aspects[0].key);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [busy, setBusy] = useState(false);
+  const live = useRef({ zoom: 1, x: 0, y: 0, w: 1, h: 1, fw: 1, fh: 1 });
+  const dragStart = useRef({ x: 0, y: 0 });
+
+  const w = work.width || 1;
+  const h = work.height || 1;
+  const spec = aspects.find((a) => a.key === aspectKey) || aspects[0];
+  const ratio = spec.ratio || Math.min(1.91, Math.max(0.8, w / h)); // "Original" keeps the photo's own shape (4:5 .. 1.91:1 like Instagram)
+  const maxH = SCREEN_HEIGHT * 0.5;
+  let fw = EDIT_W;
+  let fh = fw / ratio;
+  if (fh > maxH) { fh = maxH; fw = fh * ratio; }
+  const cover = Math.max(fw / w, fh / h);
+  const scale = cover * zoom;
+  live.current.w = w; live.current.h = h; live.current.fw = fw; live.current.fh = fh;
+
+  function limits(z) {
+    const L = live.current;
+    const s = Math.max(L.fw / L.w, L.fh / L.h) * z;
+    return { maxX: Math.max(0, (L.w * s - L.fw) / 2), maxY: Math.max(0, (L.h * s - L.fh) / 2) };
+  }
+  function apply(next) {
+    live.current = { ...live.current, ...next };
+    setZoom(live.current.zoom);
+    setOffset({ x: live.current.x, y: live.current.y });
+  }
+  useEffect(() => { apply({ zoom: 1, x: 0, y: 0 }); }, [aspectKey, work.uri]);
+
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => { dragStart.current = { x: live.current.x, y: live.current.y }; },
+      onPanResponderMove: (_, g) => {
+        const { maxX, maxY } = limits(live.current.zoom);
+        const x = Math.min(maxX, Math.max(-maxX, dragStart.current.x + g.dx));
+        const y = Math.min(maxY, Math.max(-maxY, dragStart.current.y + g.dy));
+        live.current.x = x; live.current.y = y;
+        setOffset({ x, y });
+      },
+    })
+  ).current;
+
+  function setZoomTo(z) {
+    const nz = Math.min(MAX_ZOOM, Math.max(1, z));
+    const { maxX, maxY } = limits(nz);
+    apply({ zoom: nz, x: Math.min(maxX, Math.max(-maxX, live.current.x)), y: Math.min(maxY, Math.max(-maxY, live.current.y)) });
+  }
+  const BAR_W = 160;
+  function onBarPress(e) { setZoomTo(1 + (e.nativeEvent.locationX / BAR_W) * (MAX_ZOOM - 1)); }
+
+  async function transform(fn) {
+    setBusy(true);
+    try {
+      const ctx = ImageManipulator.ImageManipulator.manipulate(work.uri);
+      fn(ctx);
+      const ref = await ctx.renderAsync();
+      const out = await ref.saveAsync({ format: ImageManipulator.SaveFormat.JPEG, compress: 0.92 });
+      setWork({ uri: out.uri, width: out.width, height: out.height });
+    } catch (e) {
+      Alert.alert("Couldn't edit", "Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirm() {
+    setBusy(true);
+    try {
+      const cw = fw / scale;
+      const ch = fh / scale;
+      let originX = w / 2 - cw / 2 - offset.x / scale;
+      let originY = h / 2 - ch / 2 - offset.y / scale;
+      originX = Math.max(0, Math.min(w - cw, originX));
+      originY = Math.max(0, Math.min(h - ch, originY));
+      const ctx = ImageManipulator.ImageManipulator.manipulate(work.uri);
+      ctx.crop({ originX: Math.round(originX), originY: Math.round(originY), width: Math.round(cw), height: Math.round(ch) });
+      if (cw > 1080) ctx.resize({ width: 1080 });
+      const ref = await ctx.renderAsync();
+      const out = await ref.saveAsync({ format: ImageManipulator.SaveFormat.JPEG, compress: 0.88 });
+      onNext({ uri: out.uri, width: out.width, height: out.height, fileName: "photo.jpg", mimeType: "image/jpeg", type: "image" });
+    } catch (e) {
+      Alert.alert("Couldn't save edits", "Please try a different photo.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={[styles.header, styles.profileHeaderRow]}>
+        <Pressable onPress={onBack} hitSlop={10}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
+        <Text style={styles.titleSmall}>{title}</Text>
+        <Pressable onPress={confirm} disabled={busy} hitSlop={10}>
+          {busy ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>{nextLabel}</Text>}
+        </Pressable>
+      </View>
+      <ScrollView contentContainerStyle={{ alignItems: "center", paddingBottom: 30 }}>
+        <View style={[styles.cropViewport, { width: fw, height: fh, marginTop: 8 }]} {...pan.panHandlers}>
+          <Image
+            source={{ uri: work.uri }}
+            style={{ position: "absolute", width: w * scale, height: h * scale, left: fw / 2 - (w * scale) / 2 + offset.x, top: fh / 2 - (h * scale) / 2 + offset.y }}
+            draggable={false}
+          />
+          <View pointerEvents="none" style={styles.cropRing} />
+        </View>
+        <Text style={[styles.roomInfo, { marginTop: 8 }]}>Drag to reposition</Text>
+        <View style={styles.editChipsRow}>
+          {aspects.map((a) => (
+            <Pressable key={a.key} onPress={() => setAspectKey(a.key)} style={[styles.editChip, aspectKey === a.key && styles.editChipActive]}>
+              <Text style={[styles.editChipText, aspectKey === a.key && { color: C.white }]}>{a.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={styles.zoomRow}>
+          <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom - 0.25)}><Ionicons name="remove" size={22} color={C.text} /></Pressable>
+          <Pressable onPress={onBarPress} hitSlop={{ top: 14, bottom: 14 }} style={[styles.zoomTrack, { width: BAR_W }]}>
+            <View pointerEvents="none" style={[styles.zoomFill, { width: ((zoom - 1) / (MAX_ZOOM - 1)) * BAR_W }]} />
+          </Pressable>
+          <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom + 0.25)}><Ionicons name="add" size={22} color={C.text} /></Pressable>
+        </View>
+        <View style={styles.zoomRow}>
+          <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.rotate(-90))} disabled={busy}>
+            <Ionicons name="refresh-outline" size={20} color={C.text} style={{ transform: [{ scaleX: -1 }] }} />
+            <Text style={styles.editToolText}>Rotate left</Text>
+          </Pressable>
+          <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.rotate(90))} disabled={busy}>
+            <Ionicons name="refresh-outline" size={20} color={C.text} />
+            <Text style={styles.editToolText}>Rotate right</Text>
+          </Pressable>
+          <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.flip("horizontal"))} disabled={busy}>
+            <Ionicons name="swap-horizontal-outline" size={20} color={C.text} />
+            <Text style={styles.editToolText}>Flip</Text>
+          </Pressable>
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+const POST_ASPECTS = [
+  { key: "orig", label: "Original", ratio: null },
+  { key: "sq", label: "1:1", ratio: 1 },
+  { key: "port", label: "4:5", ratio: 4 / 5 },
+  { key: "wide", label: "16:9", ratio: 16 / 9 },
+];
+const STORY_ASPECTS = [
+  { key: "story", label: "9:16", ratio: 9 / 16 },
+  { key: "orig", label: "Original", ratio: null },
+  { key: "sq", label: "1:1", ratio: 1 },
+];
+
+// Full-screen "new post" / "new story" flow:
+//   1. choose Photo or Video   2. edit it   3. write a caption and share.
+function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, onDone }) {
+  const isStory = mode === "story";
+  const [step, setStep] = useState("pick"); // pick | edit | caption
+  const [asset, setAsset] = useState(null); // what the picker returned
+  const [edited, setEdited] = useState(null); // ready-to-upload result
+  const [caption, setCaption] = useState("");
+  const [sharing, setSharing] = useState(false);
+
+  useEffect(() => {
+    if (visible) { setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); }
+  }, [visible]);
+
+  async function pick(kind) {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return Alert.alert("Permission needed", "Allow photo access to choose a photo or video.");
+    const result = await ImagePicker.launchImageLibraryAsync(
+      kind === "photo"
+        ? { mediaTypes: ["images"], quality: 1 }
+        // On iOS/Android the system picker lets you trim the video; browsers can't.
+        : { mediaTypes: ["videos"], allowsEditing: Platform.OS !== "web", videoMaxDuration: isStory ? 30 : 60, quality: 1 },
+    );
+    if (result.canceled) return;
+    const a = result.assets[0];
+    const isVideo = kind === "video";
+    setAsset({ ...a, isVideo });
+    if (isVideo) setEdited({ uri: a.uri, width: a.width, height: a.height, fileName: a.fileName || "video.mp4", mimeType: a.mimeType || "video/mp4", type: "video" });
+    setStep("edit");
+  }
+
+  async function share() {
+    if (!edited || sharing) return;
+    setSharing(true);
+    try {
+      const uploaded = await uploadAsset(token, { uri: edited.uri, fileName: edited.fileName, mimeType: edited.mimeType });
+      const media = { ...uploaded, width: edited.width || undefined, height: edited.height || undefined };
+      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: caption.trim(), media }) });
+      if (res.status === 401) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return Alert.alert("Couldn't share", data.error || "Something went wrong.");
+      onDone(isStory ? data.story : data.post);
+      onClose();
+    } catch (e) {
+      Alert.alert("Couldn't share", e.message || "Check your connection and try again.");
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  const videoRatio = asset?.isVideo && asset.width && asset.height ? Math.min(1.91, Math.max(0.56, asset.width / asset.height)) : 1;
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+        {step === "pick" && (
+          <View style={{ flex: 1 }}>
+            <View style={[styles.header, styles.profileHeaderRow]}>
+              <Pressable onPress={onClose} hitSlop={10}><Ionicons name="close" size={26} color={C.text} /></Pressable>
+              <Text style={styles.titleSmall}>{isStory ? "New story" : "New post"}</Text>
+              <View style={{ width: 26 }} />
+            </View>
+            <View style={{ flex: 1, justifyContent: "center", padding: 24, gap: 16 }}>
+              <Pressable style={styles.pickTile} onPress={() => pick("photo")}>
+                <Ionicons name="image-outline" size={34} color={C.accent} />
+                <Text style={styles.pickTileTitle}>Photo</Text>
+                <Text style={styles.roomInfo}>Crop, rotate and resize before posting</Text>
+              </Pressable>
+              <Pressable style={styles.pickTile} onPress={() => pick("video")}>
+                <Ionicons name="videocam-outline" size={34} color={C.accent} />
+                <Text style={styles.pickTileTitle}>Video</Text>
+                <Text style={styles.roomInfo}>{Platform.OS === "web" ? "Up to 60 seconds" : "Trim it to the part you want"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+
+        {step === "edit" && asset && !asset.isVideo && (
+          <MediaEditor
+            asset={asset}
+            aspects={isStory ? STORY_ASPECTS : POST_ASPECTS}
+            title="Edit photo"
+            onBack={() => setStep("pick")}
+            onNext={(out) => { setEdited(out); setStep("caption"); }}
+          />
+        )}
+
+        {step === "edit" && asset && asset.isVideo && (
+          <View style={{ flex: 1 }}>
+            <View style={[styles.header, styles.profileHeaderRow]}>
+              <Pressable onPress={() => setStep("pick")} hitSlop={10}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
+              <Text style={styles.titleSmall}>Preview video</Text>
+              <Pressable onPress={() => setStep("caption")} hitSlop={10}><Text style={styles.headerAction}>Next</Text></Pressable>
+            </View>
+            <View style={{ alignItems: "center", marginTop: 8 }}>
+              <MediaVideo uri={asset.uri} style={{ width: EDIT_W, aspectRatio: videoRatio, backgroundColor: "#000", borderRadius: 4 }} />
+              <Text style={[styles.roomInfo, { marginTop: 12, textAlign: "center", paddingHorizontal: 24 }]}>
+                {Platform.OS === "web" ? "Videos are shared as they are. Trimming is available in the phone app." : "Trim the video when you pick it. This is how it will look."}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {step === "caption" && edited && (
+          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+            <View style={[styles.header, styles.profileHeaderRow]}>
+              <Pressable onPress={() => setStep("edit")} hitSlop={10} disabled={sharing}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
+              <Text style={styles.titleSmall}>{isStory ? "Add to story" : "New post"}</Text>
+              <Pressable onPress={share} disabled={sharing} hitSlop={10}>
+                {sharing ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>Share</Text>}
+              </Pressable>
+            </View>
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16 }}>
+              <View style={{ flexDirection: "row", gap: 12, alignItems: "flex-start" }}>
+                {edited.type === "video" ? (
+                  <View style={[styles.captionThumb, { alignItems: "center", justifyContent: "center" }]}><Ionicons name="play-circle-outline" size={30} color={C.textMuted} /></View>
+                ) : (
+                  <Image source={{ uri: edited.uri }} style={styles.captionThumb} />
+                )}
+                <TextInput
+                  style={[styles.input, { flex: 1, minHeight: 90, textAlignVertical: "top", marginBottom: 0 }]}
+                  value={caption}
+                  onChangeText={setCaption}
+                  placeholder={isStory ? "Add a caption (optional)" : "Write a caption..."}
+                  placeholderTextColor={C.textFaint}
+                  multiline
+                  maxLength={isStory ? 500 : 2000}
+                  autoFocus={Platform.OS === "web"}
+                />
+              </View>
+              {sharing && <Text style={[styles.roomInfo, { textAlign: "center", marginTop: 20 }]}>Uploading... videos can take a little while.</Text>}
+            </ScrollView>
+          </KeyboardAvoidingView>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// ===================== Stories =====================
+function groupStories(stories, me) {
+  const map = new Map();
+  for (const s of stories) {
+    if (!map.has(s.userId)) map.set(s.userId, { userId: s.userId, userName: s.userName, userAvatarUrl: s.userAvatarUrl, stories: [] });
+    map.get(s.userId).stories.push(s);
+  }
+  const mine = map.get(me?.id) || { userId: me?.id, userName: me?.name, userAvatarUrl: me?.avatarUrl, stories: [] };
+  map.delete(me?.id);
+  const others = [...map.values()].sort((a, b) => {
+    const au = a.stories.some((s) => !s.viewedByMe) ? 0 : 1;
+    const bu = b.stories.some((s) => !s.viewedByMe) ? 0 : 1;
+    return au - bu;
+  });
+  return [mine, ...others];
+}
+
+function StoriesBar({ groups, onView, onAdd }) {
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storiesRow}>
+      {groups.map((g, i) => {
+        const isMine = i === 0;
+        const has = g.stories.length > 0;
+        const unseen = has && g.stories.some((s) => !s.viewedByMe);
+        const ringColor = !has ? "transparent" : unseen ? C.accent : C.border;
+        return (
+          <Pressable key={g.userId || "me"} style={styles.storyItem} onPress={() => (has ? onView(g) : isMine ? onAdd() : null)}>
+            <View style={[styles.storyRing, { borderColor: ringColor }]}>
+              <UserAvatar name={g.userName} avatarUrl={g.userAvatarUrl} size={58} />
+              {isMine && (
+                <Pressable style={styles.storyPlus} onPress={onAdd} hitSlop={6}>
+                  <Ionicons name="add" size={14} color={C.white} />
+                </Pressable>
+              )}
+            </View>
+            <Text style={styles.storyName} numberOfLines={1}>{isMine ? "Your story" : g.userName}</Text>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+function StoryVideo({ uri, onDuration }) {
+  const player = useVideoPlayer(uri, (p) => { if (p) { p.loop = false; p.play(); } });
+  useEffect(() => {
+    if (!player || !player.addListener) return;
+    const sub = player.addListener("sourceLoad", (e) => { if (e && e.duration) onDuration(e.duration); });
+    return () => sub && sub.remove && sub.remove();
+  }, [player]);
+  return <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />;
+}
+
+function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onDeleted }) {
+  const firstUnseen = (g) => Math.max(0, g.stories.findIndex((s) => !s.viewedByMe));
+  const [gi, setGi] = useState(startIndex);
+  const [si, setSi] = useState(() => firstUnseen(groups[startIndex]));
+  const [tick, setTick] = useState(0);
+  const [vidDur, setVidDur] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const progress = useRef(new Animated.Value(0)).current;
+  const group = groups[gi];
+  const story = group?.stories[si];
+  const isMine = group?.userId === me?.id;
+  const isVideo = story?.media?.mimeType?.startsWith("video/");
+
+  function next() {
+    if (si < group.stories.length - 1) setSi(si + 1);
+    else if (gi < groups.length - 1) { setGi(gi + 1); setSi(0); }
+    else onClose();
+  }
+  function prev() {
+    if (si > 0) setSi(si - 1);
+    else if (gi > 0) { setGi(gi - 1); setSi(0); }
+    else setTick((t) => t + 1);
+  }
+
+  useEffect(() => {
+    if (!story) return;
+    setVidDur(null);
+    if (!isMine && !story.viewedByMe) {
+      onViewed(story);
+      authedApi(`/api/stories/${story.id}/view`, { method: "POST" }).catch(() => {});
+    }
+  }, [story?.id]);
+
+  useEffect(() => {
+    if (!story || confirmDel) return;
+    progress.setValue(0);
+    const ms = isVideo ? (vidDur ? vidDur * 1000 : 15000) : 5000;
+    const anim = Animated.timing(progress, { toValue: 1, duration: ms, easing: Easing.linear, useNativeDriver: false });
+    anim.start(({ finished }) => { if (finished) next(); });
+    return () => anim.stop();
+  }, [story?.id, vidDur, tick, confirmDel]);
+
+  async function remove() {
+    try {
+      const res = await authedApi(`/api/stories/${story.id}`, { method: "DELETE" });
+      if (!res.ok) return Alert.alert("Couldn't delete", "Please try again.");
+      onDeleted(story);
+      onClose();
+    } catch (_) { Alert.alert("Couldn't delete", "Check your connection and try again."); }
+  }
+
+  if (!story) return null;
+  return (
+    <Modal visible animationType="fade" onRequestClose={onClose}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }} edges={["top", "bottom"]}>
+        <View style={{ flex: 1, alignItems: "center" }}>
+          <View style={{ flex: 1, width: "100%", maxWidth: 480 }}>
+            {isVideo ? (
+              <StoryVideo key={story.id} uri={story.media.url} onDuration={setVidDur} />
+            ) : (
+              <Image source={{ uri: story.media?.url }} style={StyleSheet.absoluteFill} resizeMode="contain" />
+            )}
+            <View style={{ position: "absolute", left: 0, right: 0, top: 0, bottom: 0, flexDirection: "row" }}>
+              <Pressable style={{ flex: 1 }} onPress={prev} />
+              <Pressable style={{ flex: 2 }} onPress={next} />
+            </View>
+            <View pointerEvents="box-none" style={styles.storyTop}>
+              <View style={{ flexDirection: "row", gap: 4 }}>
+                {group.stories.map((s, i) => (
+                  <View key={s.id} style={styles.storyBarBg}>
+                    <Animated.View style={[styles.storyBarFill, { width: i < si ? "100%" : i === si ? progress.interpolate({ inputRange: [0, 1], outputRange: ["0%", "100%"] }) : "0%" }]} />
+                  </View>
+                ))}
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", marginTop: 10 }}>
+                <UserAvatar name={group.userName} avatarUrl={group.userAvatarUrl} size={34} style={{ marginRight: 10 }} />
+                <Text style={styles.storyHeaderName}>{isMine ? "Your story" : group.userName}</Text>
+                <Text style={styles.storyHeaderTime}>  {timeAgo(story.createdAt)}</Text>
+                <View style={{ flex: 1 }} />
+                {isMine && (
+                  <Pressable onPress={() => setConfirmDel(true)} hitSlop={10} style={{ padding: 6 }}>
+                    <Ionicons name="trash-outline" size={22} color="#fff" />
+                  </Pressable>
+                )}
+                <Pressable onPress={onClose} hitSlop={10} style={{ padding: 6 }}>
+                  <Ionicons name="close" size={28} color="#fff" />
+                </Pressable>
+              </View>
+            </View>
+            {(!!story.text || isMine) && (
+              <View pointerEvents="none" style={styles.storyBottom}>
+                {!!story.text && <Text style={styles.storyCaption}>{story.text}</Text>}
+                {isMine && <Text style={styles.storyViews}>👁 {story.viewCount || 0} {story.viewCount === 1 ? "view" : "views"}</Text>}
+              </View>
+            )}
+          </View>
+        </View>
+        <ActionSheet
+          visible={confirmDel}
+          title="Delete this story?"
+          actions={[{ label: "Delete story", icon: "trash-outline", destructive: true, onPress: remove }]}
+          onClose={() => setConfirmDel(false)}
+        />
+      </SafeAreaView>
+    </Modal>
   );
 }
 
@@ -2689,7 +3147,7 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
         data={posts}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
-          <View style={{ paddingHorizontal: 16 }}>
+          <View>
             <PostCard item={item} isOwner me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
           </View>
         )}
@@ -3198,6 +3656,41 @@ function buildStyles(C) {
   statLabel: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   divider: { height: 1, backgroundColor: C.border, marginTop: 20 },
   postMenuBtn: { padding: 6, marginLeft: 4 },
+  brandTitle: { color: C.text, fontSize: 26, fontWeight: "900", letterSpacing: 1, textAlign: "center" },
+  headerAction: { color: C.accent, fontSize: 16, fontWeight: "800" },
+  storiesWrap: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border, marginBottom: 6 },
+  storiesRow: { paddingHorizontal: 12, paddingVertical: 10, gap: 14 },
+  storyItem: { alignItems: "center", width: 74 },
+  storyRing: { width: 70, height: 70, borderRadius: 35, borderWidth: 2.5, alignItems: "center", justifyContent: "center" },
+  storyPlus: { position: "absolute", right: -2, bottom: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: C.accent, alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: C.bg },
+  storyName: { color: C.text, fontSize: 12, marginTop: 5, maxWidth: 70 },
+  storyTop: { position: "absolute", left: 0, right: 0, top: 0, paddingHorizontal: 10, paddingTop: 8 },
+  storyBarBg: { flex: 1, height: 3, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.35)", overflow: "hidden" },
+  storyBarFill: { height: 3, backgroundColor: "#fff" },
+  storyHeaderName: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  storyHeaderTime: { color: "rgba(255,255,255,0.7)", fontSize: 13 },
+  storyBottom: { position: "absolute", left: 0, right: 0, bottom: 0, padding: 16, backgroundColor: "rgba(0,0,0,0.35)" },
+  storyCaption: { color: "#fff", fontSize: 17, lineHeight: 23 },
+  storyViews: { color: "rgba(255,255,255,0.85)", fontSize: 13, marginTop: 8 },
+  igPost: { width: FEED_W, alignSelf: "center", marginBottom: 14 },
+  igHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8 },
+  igName: { color: C.text, fontWeight: "800", fontSize: 14 },
+  igActions: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingTop: 10, gap: 16 },
+  igAction: { padding: 2 },
+  igBody: { paddingHorizontal: 12, paddingTop: 6, gap: 4 },
+  igLikes: { color: C.text, fontWeight: "800", fontSize: 14 },
+  igCaption: { color: C.text, fontSize: 14, lineHeight: 20 },
+  igMuted: { color: C.textMuted, fontSize: 14 },
+  igTime: { color: C.textFaint, fontSize: 10, letterSpacing: 0.4, marginTop: 2 },
+  pickTile: { backgroundColor: C.surface, borderRadius: 20, padding: 24, alignItems: "center", gap: 6, borderWidth: 1, borderColor: C.border },
+  pickTileTitle: { color: C.text, fontSize: 18, fontWeight: "800" },
+  captionThumb: { width: 84, height: 84, borderRadius: 10, backgroundColor: C.surfaceRaised },
+  editChipsRow: { flexDirection: "row", gap: 8, marginTop: 14, flexWrap: "wrap", justifyContent: "center" },
+  editChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18, backgroundColor: C.surfaceRaised },
+  editChipActive: { backgroundColor: C.accent },
+  editChipText: { color: C.text, fontWeight: "700", fontSize: 13 },
+  editToolBtn: { alignItems: "center", gap: 4, paddingHorizontal: 12 },
+  editToolText: { color: C.textMuted, fontSize: 11 },
   bellBadge: { position: "absolute", top: -6, right: -6, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4, backgroundColor: "#E5484D", alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: C.bg },
   bellBadgeText: { color: "#fff", fontSize: 10, fontWeight: "900" },
   notifRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 16, marginBottom: 8, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
