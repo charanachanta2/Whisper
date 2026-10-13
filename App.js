@@ -36,7 +36,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 // different, class-based shape and doesn't have them.
 import * as FileSystem from "expo-file-system/legacy";
 import { VideoView, useVideoPlayer } from "expo-video";
-import { AudioModule } from "expo-audio";
+import { AudioModule, createAudioPlayer, setAudioModeAsync } from "expo-audio";
 import { useEvent } from "expo";
 import { io } from "socket.io-client";
 // Neither iOS nor Android has a status bar style set anywhere in this file,
@@ -2761,12 +2761,77 @@ function DraggableOverlay({ o, W, H, selected, onMove, onTap }) {
   );
 }
 
+// ---- Short audio clips (song previews) ----
+// Browsers only play sound through a real <audio> element (a video player
+// that isn't on screen stays silent), so the web build uses one directly;
+// phones use expo-audio. play() resolves false if the browser blocks
+// autoplay until the person taps something.
+function createClip(url, loop, onState) {
+  if (Platform.OS === "web") {
+    const el = new window.Audio(url);
+    el.loop = loop;
+    el.preload = "auto";
+    el.addEventListener("play", () => onState(true));
+    el.addEventListener("pause", () => onState(false));
+    el.addEventListener("ended", () => onState(false));
+    return {
+      play: async () => { try { await el.play(); return true; } catch (_) { return false; } },
+      pause: () => el.pause(),
+      release: () => { try { el.pause(); el.removeAttribute("src"); el.load(); } catch (_) {} },
+    };
+  }
+  try { setAudioModeAsync({ playsInSilentMode: true }); } catch (_) {}
+  const p = createAudioPlayer({ uri: url });
+  p.loop = loop;
+  const sub = p.addListener("playbackStatusUpdate", (st) => onState(!!(st && st.playing)));
+  return {
+    play: async () => { try { p.play(); return true; } catch (_) { return false; } },
+    pause: () => { try { p.pause(); } catch (_) {} },
+    release: () => { try { sub.remove(); } catch (_) {} try { p.remove(); } catch (_) {} },
+  };
+}
+
+function useClip(url, { loop = true, autoplay = false } = {}) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [blocked, setBlocked] = useState(false);
+  const clip = useRef(null);
+  useEffect(() => {
+    if (!url) return;
+    const c = createClip(url, loop, setIsPlaying);
+    clip.current = c;
+    let unlock = null;
+    if (autoplay) {
+      c.play().then((ok) => {
+        if (ok || !(Platform.OS === "web" && typeof document !== "undefined")) return;
+        // Autoplay was blocked: start on the very next tap/click anywhere.
+        setBlocked(true);
+        unlock = () => { c.play().then((o) => { if (o) setBlocked(false); }); };
+        document.addEventListener("pointerdown", unlock, { once: true });
+      });
+    }
+    return () => {
+      if (unlock) document.removeEventListener("pointerdown", unlock);
+      c.release();
+      clip.current = null;
+      setIsPlaying(false);
+    };
+  }, [url]);
+  async function toggle() {
+    const c = clip.current;
+    if (!c) return;
+    if (isPlaying) c.pause();
+    else if (await c.play()) setBlocked(false);
+  }
+  return { isPlaying, blocked, toggle };
+}
+
 // ---- Music ----
-function MusicPill({ music, onRemove, onPress, light }) {
+function MusicPill({ music, onRemove, onPress, light, trailing }) {
   return (
     <Pressable style={[styles.musicPill, light && styles.musicPillDark]} onPress={onPress} disabled={!onPress}>
       {music.artworkUrl ? <Image source={{ uri: music.artworkUrl }} style={styles.musicArt} /> : <Ionicons name="musical-notes" size={16} color={light ? "#fff" : C.text} />}
       <Text style={[styles.musicPillText, light && { color: "#fff" }]} numberOfLines={1}>{music.title}{music.artist ? ` · ${music.artist}` : ""}</Text>
+      {trailing}
       {onRemove && (
         <Pressable onPress={onRemove} hitSlop={8}><Ionicons name="close" size={16} color={light ? "#fff" : C.textMuted} /></Pressable>
       )}
@@ -2781,10 +2846,11 @@ function MusicPicker({ visible, authedApi, onClose, onPick }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [playingId, setPlayingId] = useState(null);
-  const player = useVideoPlayer(null, (p) => { if (p) p.loop = false; });
+  const [previewUrl, setPreviewUrl] = useState(null);
+  useClip(previewUrl, { loop: false, autoplay: true });
 
   useEffect(() => {
-    if (!visible) { try { player.pause(); } catch (_) {} setPlayingId(null); setQuery(""); setResults([]); setError(""); }
+    if (!visible) { setPlayingId(null); setPreviewUrl(null); setQuery(""); setResults([]); setError(""); }
   }, [visible]);
 
   useEffect(() => {
@@ -2804,15 +2870,12 @@ function MusicPicker({ visible, authedApi, onClose, onPick }) {
   }, [query]);
 
   function togglePreview(t) {
-    try {
-      if (playingId === t.trackId) { player.pause(); setPlayingId(null); return; }
-      player.replace(t.previewUrl);
-      player.play();
-      setPlayingId(t.trackId);
-    } catch (_) {}
+    if (playingId === t.trackId) { setPlayingId(null); setPreviewUrl(null); return; }
+    setPlayingId(t.trackId);
+    setPreviewUrl(t.previewUrl);
   }
   function choose(t) {
-    try { player.pause(); } catch (_) {}
+    setPreviewUrl(null);
     onPick({ trackId: t.trackId, title: t.title, artist: t.artist, artworkUrl: t.artworkUrl, previewUrl: t.previewUrl });
     onClose();
   }
@@ -2870,10 +2933,9 @@ function MusicPicker({ visible, authedApi, onClose, onPick }) {
 
 // Music line on a post in the feed: tap to play/pause the 30s clip.
 function PostMusicBar({ music }) {
-  const player = useVideoPlayer(music.previewUrl, (p) => { if (p) p.loop = true; });
-  const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player?.playing || false });
+  const { isPlaying, toggle } = useClip(music.previewUrl, { loop: true });
   return (
-    <Pressable style={styles.postMusicBar} onPress={() => (isPlaying ? player.pause() : player.play())}>
+    <Pressable style={styles.postMusicBar} onPress={toggle}>
       <Ionicons name="musical-notes" size={14} color={C.text} />
       <Text style={styles.postMusicText} numberOfLines={1}>{music.title}{music.artist ? ` · ${music.artist}` : ""}</Text>
       <Ionicons name={isPlaying ? "pause-circle" : "play-circle"} size={22} color={C.accent} />
@@ -2883,8 +2945,15 @@ function PostMusicBar({ music }) {
 
 // Plays a story's song while that story is on screen.
 function StoryMusic({ music }) {
-  const player = useVideoPlayer(music.previewUrl, (p) => { if (p) { p.loop = true; p.play(); } });
-  return <MusicPill music={music} light onPress={() => (player.playing ? player.pause() : player.play())} />;
+  const { isPlaying, toggle } = useClip(music.previewUrl, { loop: true, autoplay: true });
+  return (
+    <MusicPill
+      music={music}
+      light
+      onPress={toggle}
+      trailing={<Ionicons name={isPlaying ? "volume-high" : "play"} size={16} color="#fff" />}
+    />
+  );
 }
 
 // Step between editing the photo and posting: add text stickers and music.
