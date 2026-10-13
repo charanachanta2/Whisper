@@ -1770,8 +1770,12 @@ function UserAvatar({ name, avatarUrl, thumbUrl, size = 38, style }) {
   const dim = { width: size, height: size, borderRadius: size / 2 };
   // Small avatars use the 128px thumbnail (a few KB) instead of the full photo.
   const src = size <= 64 ? thumbUrl || avatarUrl : avatarUrl;
-  if (src) {
-    return <Image source={{ uri: src }} style={[styles.avatarSm, dim, style]} />;
+  // If the photo fails to load (deleted file, offline), show the initial
+  // instead of a blank circle.
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [src]);
+  if (src && !failed) {
+    return <Image source={{ uri: src }} style={[styles.avatarSm, dim, style]} onError={() => setFailed(true)} />;
   }
   return (
     <View style={[styles.avatarSm, dim, { backgroundColor: colorFor(name || "?"), alignItems: "center", justifyContent: "center" }, style]}>
@@ -2608,6 +2612,8 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
   const [editingPost, setEditingPost] = useState(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [cropAsset, setCropAsset] = useState(null);
+  const [avatarFailed, setAvatarFailed] = useState(false);
+  useEffect(() => { setAvatarFailed(false); }, [me?.avatarUrl]);
 
   const load = async () => {
     setLoadingPosts(true);
@@ -2694,8 +2700,8 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
                 <View style={[styles.avatarLarge, { backgroundColor: colorFor(me?.username || "?") }]}>
                   {uploadingAvatar ? (
                     <ActivityIndicator color={C.white} />
-                  ) : me?.avatarUrl ? (
-                    <Image source={{ uri: me.avatarUrl }} style={styles.avatarLargeImg} />
+                  ) : me?.avatarUrl && !avatarFailed ? (
+                    <Image source={{ uri: me.avatarUrl }} style={styles.avatarLargeImg} onError={() => setAvatarFailed(true)} />
                   ) : (
                     <Text style={[styles.avatarText, { fontSize: 32 }]}>{(me?.name || "?")[0].toUpperCase()}</Text>
                   )}
