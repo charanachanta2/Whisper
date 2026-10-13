@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -1940,7 +1940,7 @@ function PostImage({ uri, knownRatio, onDoubleTap, overlays }) {
 // A single post, shared by the Home feed and the Profile tab. The owner gets
 // a three-dot menu (Edit / Delete); everyone gets Like and Comment.
 // onChanged(post) receives the server's updated copy after a like/comment.
-function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged }) {
+function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged, isActive = false }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [commentsOpen, setCommentsOpen] = useState(false);
@@ -1976,14 +1976,14 @@ function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged })
           </Pressable>
         )}
       </View>
-      {item.music && <PostMusicBar music={item.music} />}
+      {item.music && <PostMusicBar music={item.music} active={isActive} maxPlaySec={item.duration || null} />}
       {item.media && (
         item.media.mimeType?.startsWith("video/") ? (
           (() => {
             const vr = item.media.width && item.media.height ? Math.min(1.91, Math.max(0.8, item.media.width / item.media.height)) : 1;
             return (
               <View style={{ width: FEED_W, height: FEED_W / vr, backgroundColor: "#000" }}>
-                <MediaVideo uri={item.media.url} style={{ width: FEED_W, height: FEED_W / vr }} />
+                <MediaVideo uri={item.media.url} style={{ width: FEED_W, height: FEED_W / vr }} muted={!!item.music} />
                 <OverlayLayer overlays={item.overlays} W={FEED_W} H={FEED_W / vr} />
               </View>
             );
@@ -2265,6 +2265,9 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
   const [editingPost, setEditingPost] = useState(null);
   const [creating, setCreating] = useState(null); // null | "post" | "story"
   const [viewer, setViewer] = useState(null); // { userId }
+  // Music on a post plays while that post is on screen; it stops while the
+  // story viewer, composer or editor is open on top of the feed.
+  const activePost = useActivePost(!!creating || !!viewer || !!editingPost);
 
   const load = async () => {
     try {
@@ -2327,8 +2330,11 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
         }
         data={posts}
         keyExtractor={(item) => item.id}
+        extraData={activePost.activeId}
+        onViewableItemsChanged={activePost.onViewableItemsChanged}
+        viewabilityConfig={activePost.viewabilityConfig}
         renderItem={({ item }) => (
-          <PostCard item={item} isOwner={item.userId === me?.id} me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
+          <PostCard item={item} isActive={item.id === activePost.activeId} isOwner={item.userId === me?.id} me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
         )}
         ListEmptyComponent={loadingPosts ? <ActivityIndicator style={{ marginTop: 30 }} /> : <Text style={styles.empty}>Friends' posts will appear here.{"\n"}Tap + to share your first photo.</Text>}
       />
@@ -2370,8 +2376,10 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
 const FEED_W = Math.min(SCREEN_WIDTH, 560);
 const EDIT_W = Math.min(SCREEN_WIDTH - 32, 420);
 
-function MediaVideo({ uri, style, controls = true }) {
-  const player = useVideoPlayer(uri, (p) => { if (p) { p.loop = false; } });
+// muted: used when a song is attached, so the song replaces the video's own sound.
+function MediaVideo({ uri, style, controls = true, muted = false }) {
+  const player = useVideoPlayer(uri, (p) => { if (p) { p.loop = false; p.muted = muted; } });
+  useEffect(() => { if (player) player.muted = muted; }, [player, muted]);
   return <VideoView style={style} player={player} contentFit="contain" allowsFullscreen nativeControls={controls} />;
 }
 
@@ -2535,6 +2543,23 @@ const STORY_ASPECTS = [
   { key: "sq", label: "1:1", ratio: 1 },
 ];
 
+// Browsers don't tell us a picked video's length, so read it from the file
+// itself. Resolves null if it can't be read (we then let the server decide).
+function probeVideoSeconds(uri) {
+  return new Promise((resolve) => {
+    try {
+      const v = document.createElement("video");
+      let settled = false;
+      const done = (n) => { if (!settled) { settled = true; v.removeAttribute("src"); try { v.load(); } catch (_) {} resolve(n); } };
+      v.preload = "metadata";
+      v.onloadedmetadata = () => done(Number.isFinite(v.duration) ? v.duration : null);
+      v.onerror = () => done(null);
+      setTimeout(() => done(null), 5000);
+      v.src = uri;
+    } catch (_) { resolve(null); }
+  });
+}
+
 // Full-screen "new post" / "new story" flow:
 //   1. choose Photo or Video   2. edit it   3. write a caption and share.
 function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, onDone }) {
@@ -2545,10 +2570,14 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
   const [caption, setCaption] = useState("");
   const [sharing, setSharing] = useState(false);
   const [overlays, setOverlays] = useState([]); // text stickers on the photo
-  const [music, setMusic] = useState(null); // 30s song clip
+  const [music, setMusic] = useState(null); // 30s song clip (startSec = where in the clip it begins)
+  // How long the post/story plays. Photos: posts 15-30s, stories up to 15s.
+  // Videos use their own length (max 60s), measured when the video is picked.
+  const [duration, setDuration] = useState(isStory ? 5 : 15);
+  const [videoSec, setVideoSec] = useState(null);
 
   useEffect(() => {
-    if (visible) { setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); }
+    if (visible) { setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); setDuration(isStory ? 5 : 15); setVideoSec(null); }
   }, [visible]);
 
   async function pick(kind) {
@@ -2558,11 +2587,22 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
       kind === "photo"
         ? { mediaTypes: ["images"], quality: 1 }
         // On iOS/Android the system picker lets you trim the video; browsers can't.
-        : { mediaTypes: ["videos"], allowsEditing: Platform.OS !== "web", videoMaxDuration: isStory ? 30 : 60, quality: 1 },
+        : { mediaTypes: ["videos"], allowsEditing: Platform.OS !== "web", videoMaxDuration: MAX_VIDEO_SEC, quality: 1 },
     );
     if (result.canceled) return;
     const a = result.assets[0];
     const isVideo = kind === "video";
+    // Videos are capped at 60 seconds for both posts and stories. The phone
+    // picker trims for us, but browsers can't, so always check the real length.
+    let secs = null;
+    if (isVideo) {
+      secs = a.duration ? a.duration / 1000 : null; // expo-image-picker reports ms
+      if (secs == null && Platform.OS === "web") secs = await probeVideoSeconds(a.uri);
+      if (secs != null && secs > MAX_VIDEO_SEC + 0.5) {
+        return Alert.alert("Video is too long", `Videos can be up to ${MAX_VIDEO_SEC} seconds (this one is ${fmtClock(secs)}). ${Platform.OS === "web" ? "Trim it and try again." : "Trim it to 1:00 or less and try again."}`);
+      }
+    }
+    setVideoSec(secs != null ? Math.max(1, Math.round(secs)) : null);
     setAsset({ ...a, isVideo });
     if (isVideo) setEdited({ uri: a.uri, width: a.width, height: a.height, fileName: a.fileName || "video.mp4", mimeType: a.mimeType || "video/mp4", type: "video" });
     setStep("edit");
@@ -2574,7 +2614,11 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
     try {
       const uploaded = await uploadAsset(token, { uri: edited.uri, fileName: edited.fileName, mimeType: edited.mimeType });
       const media = { ...uploaded, width: edited.width || undefined, height: edited.height || undefined };
-      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: isStory ? "" : caption.trim(), media, music, overlays: overlays.filter((o) => o.text.trim()) }) });
+      // Video: its own length. Photo: the length chosen on the previous step.
+      const playSec = asset?.isVideo ? (videoSec || MAX_VIDEO_SEC) : duration;
+      const seg = music ? musicSegment(music, playSec) : null;
+      const musicOut = seg ? { ...music, startSec: seg.start, endSec: seg.end } : null;
+      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: isStory ? "" : caption.trim(), media, duration: playSec, music: musicOut, overlays: overlays.filter((o) => o.text.trim()) }) });
       if (res.status === 401) return;
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return Alert.alert("Couldn't share", data.error || "Something went wrong.");
@@ -2603,12 +2647,12 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
               <Pressable style={styles.pickTile} onPress={() => pick("photo")}>
                 <Ionicons name="image-outline" size={34} color={C.accent} />
                 <Text style={styles.pickTileTitle}>Photo</Text>
-                <Text style={styles.roomInfo}>Crop, rotate and resize before posting</Text>
+                <Text style={styles.roomInfo}>{isStory ? "Crop and resize. Stays up for up to 15 seconds" : "Crop and resize. Plays for 15 to 30 seconds"}</Text>
               </Pressable>
               <Pressable style={styles.pickTile} onPress={() => pick("video")}>
                 <Ionicons name="videocam-outline" size={34} color={C.accent} />
                 <Text style={styles.pickTileTitle}>Video</Text>
-                <Text style={styles.roomInfo}>{Platform.OS === "web" ? "Up to 60 seconds" : "Trim it to the part you want"}</Text>
+                <Text style={styles.roomInfo}>{Platform.OS === "web" ? "Up to 60 seconds" : "Up to 60 seconds. Trim it to the part you want"}</Text>
               </Pressable>
             </View>
           </View>
@@ -2634,6 +2678,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
             <View style={{ alignItems: "center", marginTop: 8 }}>
               <MediaVideo uri={asset.uri} style={{ width: EDIT_W, aspectRatio: videoRatio, backgroundColor: "#000", borderRadius: 4 }} />
               <Text style={[styles.roomInfo, { marginTop: 12, textAlign: "center", paddingHorizontal: 24 }]}>
+                {videoSec ? `Length ${fmtClock(videoSec)} (max 1:00). ` : "Max length 1:00. "}
                 {Platform.OS === "web" ? "Videos are shared as they are. Trimming is available in the phone app." : "Trim the video when you pick it. This is how it will look."}
               </Text>
             </View>
@@ -2647,6 +2692,11 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
             setOverlays={setOverlays}
             music={music}
             setMusic={setMusic}
+            isVideo={!!asset?.isVideo}
+            videoSec={videoSec}
+            isStory={isStory}
+            duration={duration}
+            setDuration={setDuration}
             authedApi={authedApi}
             title={isStory ? "Add to story" : "Text & music"}
             nextLabel={isStory ? "Share" : "Next"}
@@ -2766,63 +2816,216 @@ function DraggableOverlay({ o, W, H, selected, onMove, onTap }) {
 // that isn't on screen stays silent), so the web build uses one directly;
 // phones use expo-audio. play() resolves false if the browser blocks
 // autoplay until the person taps something.
-function createClip(url, loop, onState) {
+//
+// A clip can play just a *part* of the 30s preview: it starts at startSec,
+// loops back to startSec when it reaches endSec, and (if maxPlaySec is set)
+// stops once it has played that many seconds in total -- which is how a
+// 15-30s photo post or a 5-15s story gets exactly the music length it needs.
+const CLIP_SEC = 30; // iTunes song previews are 30 seconds long
+const MIN_MUSIC_WINDOW = 5; // shortest part of a song you can pick
+const MAX_VIDEO_SEC = 60; // posts and stories
+const POST_PHOTO_SECONDS = [15, 20, 25, 30];
+const STORY_PHOTO_SECONDS = [5, 10, 15];
+
+function fmtClock(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+// The part of the preview that plays: it starts where the person dragged to
+// and runs for as long as the post is long (up to the end of the preview).
+function musicSegment(music, durationSec) {
+  const win = Math.min(CLIP_SEC, Math.max(MIN_MUSIC_WINDOW, Math.round(durationSec || CLIP_SEC)));
+  const start = Math.max(0, Math.min(CLIP_SEC - MIN_MUSIC_WINDOW, Math.round((music && music.startSec) || 0)));
+  return { start, end: Math.min(CLIP_SEC, start + win) };
+}
+
+function createClip(url, opts, cb) {
+  const { startSec = 0, endSec = null, loop = true, maxPlaySec = null, muted = false } = opts || {};
+  const { onState = () => {}, onProgress = () => {} } = cb || {};
+  let played = 0; // seconds actually played so far, across loops
+  let last = 0; // wall-clock ms of the previous tick while playing
+  let needSeek = startSec > 0;
+  let done = false; // hit maxPlaySec (or ended without looping)
+  // Adds the time since the last tick to `played`; true once maxPlaySec is used up.
+  function tick(stillPlaying) {
+    const now = Date.now();
+    if (last) played += (now - last) / 1000;
+    last = stillPlaying ? now : 0;
+    if (maxPlaySec) onProgress(Math.min(1, played / maxPlaySec));
+    return !!maxPlaySec && played >= maxPlaySec;
+  }
+  function reset() { played = 0; last = 0; done = false; needSeek = true; onProgress(0); }
+
   if (Platform.OS === "web") {
     const el = new window.Audio(url);
-    el.loop = loop;
     el.preload = "auto";
-    el.addEventListener("play", () => onState(true));
-    el.addEventListener("pause", () => onState(false));
-    el.addEventListener("ended", () => onState(false));
+    el.muted = !!muted;
+    let timer = null;
+    const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
+    const rewind = () => { try { el.currentTime = startSec; } catch (_) {} };
+    const finish = () => { stopTimer(); done = true; last = 0; el.pause(); onState(false); };
+    const startTimer = () => {
+      stopTimer();
+      last = Date.now();
+      timer = setInterval(() => {
+        if (el.paused) return;
+        if (tick(true)) return finish();
+        if (endSec && el.currentTime >= endSec - 0.05) { if (loop) rewind(); else finish(); }
+      }, 100);
+    };
+    el.addEventListener("play", () => { onState(true); startTimer(); });
+    el.addEventListener("pause", () => { onState(false); stopTimer(); tick(false); });
+    el.addEventListener("ended", () => {
+      if (loop && !done) { rewind(); el.play().catch(() => {}); } else onState(false);
+    });
+    const metadata = new Promise((res) => {
+      if (el.readyState >= 1) res();
+      else { el.addEventListener("loadedmetadata", () => res(), { once: true }); setTimeout(res, 4000); }
+    });
     return {
-      play: async () => { try { await el.play(); return true; } catch (_) { return false; } },
+      play: async () => {
+        try {
+          if (done) reset();
+          if (needSeek) { if (el.readyState < 1) await metadata; rewind(); needSeek = false; }
+          await el.play();
+          return true;
+        } catch (_) { return false; }
+      },
       pause: () => el.pause(),
-      release: () => { try { el.pause(); el.removeAttribute("src"); el.load(); } catch (_) {} },
+      restart: reset,
+      setMuted: (m) => { el.muted = !!m; },
+      release: () => { stopTimer(); try { el.pause(); el.removeAttribute("src"); el.load(); } catch (_) {} },
     };
   }
+
   try { setAudioModeAsync({ playsInSilentMode: true }); } catch (_) {}
-  const p = createAudioPlayer({ uri: url });
-  p.loop = loop;
-  const sub = p.addListener("playbackStatusUpdate", (st) => onState(!!(st && st.playing)));
+  const p = createAudioPlayer({ uri: url }, { updateInterval: 100 });
+  p.loop = false; // we loop the chosen window ourselves
+  try { p.muted = !!muted; } catch (_) {}
+  const rewind = () => { try { const r = p.seekTo(startSec); if (r && r.catch) r.catch(() => {}); } catch (_) {} };
+  const finish = () => { done = true; last = 0; try { p.pause(); } catch (_) {} onState(false); };
+  const sub = p.addListener("playbackStatusUpdate", (st) => {
+    if (!st) return;
+    const playing = !!st.playing;
+    onState(playing);
+    const t = st.currentTime || 0;
+    // The first play() can run before the file is loaded, so a seek may not
+    // have stuck -- fix the position as soon as it reports loaded.
+    if (needSeek && st.isLoaded) { needSeek = false; if (Math.abs(t - startSec) > 0.5) rewind(); }
+    if (playing) {
+      if (tick(true)) return finish();
+      if (endSec && t >= endSec - 0.05) { if (loop) rewind(); else finish(); }
+    } else tick(false);
+    if (st.didJustFinish) {
+      if (loop && !done) { rewind(); try { p.play(); } catch (_) {} } else onState(false);
+    }
+  });
   return {
-    play: async () => { try { p.play(); return true; } catch (_) { return false; } },
+    play: async () => {
+      try {
+        if (done) reset();
+        if (needSeek) { try { await p.seekTo(startSec); needSeek = false; } catch (_) { /* not loaded yet: the status listener retries */ } }
+        p.play();
+        last = Date.now();
+        return true;
+      } catch (_) { return false; }
+    },
     pause: () => { try { p.pause(); } catch (_) {} },
+    restart: reset,
+    setMuted: (m) => { try { p.muted = !!m; } catch (_) {} },
     release: () => { try { sub.remove(); } catch (_) {} try { p.remove(); } catch (_) {} },
   };
 }
 
-function useClip(url, { loop = true, autoplay = false } = {}) {
+// autoplay + active: the clip plays whenever it's active and pauses when it
+// isn't (e.g. the post scrolled out of view). muted keeps it playing silently.
+function useClip(url, { startSec = 0, endSec = null, loop = true, maxPlaySec = null, autoplay = false, active = true, muted = false } = {}) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  const [progress, setProgress] = useState(0); // 0..1 of maxPlaySec
   const clip = useRef(null);
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+  const wantPlay = autoplay && active;
+
   useEffect(() => {
     if (!url) return;
-    const c = createClip(url, loop, setIsPlaying);
+    setProgress(0);
+    const c = createClip(url, { startSec, endSec, loop, maxPlaySec, muted: mutedRef.current }, { onState: setIsPlaying, onProgress: setProgress });
     clip.current = c;
-    let unlock = null;
-    if (autoplay) {
-      c.play().then((ok) => {
-        if (ok || !(Platform.OS === "web" && typeof document !== "undefined")) return;
-        // Autoplay was blocked: start on the very next tap/click anywhere.
-        setBlocked(true);
-        unlock = () => { c.play().then((o) => { if (o) setBlocked(false); }); };
-        document.addEventListener("pointerdown", unlock, { once: true });
-      });
-    }
     return () => {
-      if (unlock) document.removeEventListener("pointerdown", unlock);
       c.release();
       clip.current = null;
       setIsPlaying(false);
     };
-  }, [url]);
+  }, [url, startSec, endSec, loop, maxPlaySec]);
+
+  useEffect(() => { if (clip.current) clip.current.setMuted(muted); }, [muted, url, startSec, endSec, loop, maxPlaySec]);
+
+  useEffect(() => {
+    const c = clip.current;
+    if (!c || !wantPlay) return;
+    let unlock = null;
+    c.restart();
+    c.play().then((ok) => {
+      if (ok) { setBlocked(false); return; }
+      if (!(Platform.OS === "web" && typeof document !== "undefined")) return;
+      // Autoplay was blocked: start on the very next tap/click anywhere.
+      setBlocked(true);
+      unlock = () => { c.play().then((o) => { if (o) setBlocked(false); }); };
+      document.addEventListener("pointerdown", unlock, { once: true });
+    });
+    return () => {
+      if (unlock) document.removeEventListener("pointerdown", unlock);
+      c.pause();
+    };
+  }, [wantPlay, url, startSec, endSec, loop, maxPlaySec]);
+
   async function toggle() {
     const c = clip.current;
     if (!c) return;
     if (isPlaying) c.pause();
     else if (await c.play()) setBlocked(false);
   }
-  return { isPlaying, blocked, toggle };
+  return { isPlaying, blocked, progress, toggle };
+}
+
+// Mute for music on *posts* is one shared, remembered switch (like Reels):
+// mute one post and the rest stay muted until you turn sound back on.
+// Stories deliberately have no equivalent -- their music always plays.
+const POSTS_MUTED_KEY = "music_chat_posts_muted";
+let postsMuted = false;
+const postsMutedListeners = new Set();
+AsyncStorage.getItem(POSTS_MUTED_KEY).then((v) => {
+  postsMuted = v === "1";
+  postsMutedListeners.forEach((f) => f(postsMuted));
+}).catch(() => {});
+function usePostsMuted() {
+  const [muted, setMuted] = useState(postsMuted);
+  useEffect(() => {
+    postsMutedListeners.add(setMuted);
+    setMuted(postsMuted);
+    return () => { postsMutedListeners.delete(setMuted); };
+  }, []);
+  const toggle = useCallback(() => {
+    postsMuted = !postsMuted;
+    AsyncStorage.setItem(POSTS_MUTED_KEY, postsMuted ? "1" : "0").catch(() => {});
+    postsMutedListeners.forEach((f) => f(postsMuted));
+  }, []);
+  return [muted, toggle];
+}
+
+// Which post (that has music) is on screen right now. Only that one plays;
+// scrolling to the next one switches the song. `paused` silences everything
+// while a full-screen thing (story viewer, composer, editor) is open.
+function useActivePost(paused) {
+  const [viewableId, setViewableId] = useState(null);
+  const onViewableItemsChanged = useRef(({ viewableItems }) => {
+    const hit = (viewableItems || []).find((v) => v.item && v.item.music);
+    setViewableId(hit ? hit.item.id : null);
+  }).current;
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 60, minimumViewTime: 300 }).current;
+  return { activeId: paused ? null : viewableId, onViewableItemsChanged, viewabilityConfig };
 }
 
 // ---- Music ----
@@ -2931,33 +3134,118 @@ function MusicPicker({ visible, authedApi, onClose, onPick }) {
   );
 }
 
-// Music line on a post in the feed: tap to play/pause the 30s clip.
-function PostMusicBar({ music }) {
-  const { isPlaying, toggle } = useClip(music.previewUrl, { loop: true });
+// Music line on a post in the feed. It starts by itself when the post is on
+// screen (and plays the part of the song the author picked); tap the speaker
+// to mute, or the song to pause. A thin bar shows how much of the post's
+// length has played.
+function PostMusicBar({ music, active, maxPlaySec }) {
+  const [muted, toggleMute] = usePostsMuted();
+  const { isPlaying, progress, toggle } = useClip(music.previewUrl, {
+    startSec: music.startSec || 0,
+    endSec: music.endSec || null,
+    loop: true,
+    maxPlaySec: maxPlaySec || null,
+    autoplay: true,
+    active: !!active,
+    muted,
+  });
   return (
-    <Pressable style={styles.postMusicBar} onPress={toggle}>
-      <Ionicons name="musical-notes" size={14} color={C.text} />
-      <Text style={styles.postMusicText} numberOfLines={1}>{music.title}{music.artist ? ` · ${music.artist}` : ""}</Text>
-      <Ionicons name={isPlaying ? "pause-circle" : "play-circle"} size={22} color={C.accent} />
-    </Pressable>
+    <View>
+      <View style={styles.postMusicBar}>
+        <Pressable onPress={toggle} style={styles.postMusicMain} hitSlop={6}>
+          <Ionicons name="musical-notes" size={14} color={C.text} />
+          <Text style={styles.postMusicText} numberOfLines={1}>{music.title}{music.artist ? ` · ${music.artist}` : ""}</Text>
+          <Ionicons name={isPlaying ? "pause-circle" : "play-circle"} size={22} color={C.accent} />
+        </Pressable>
+        <Pressable onPress={toggleMute} hitSlop={10} style={styles.postMuteBtn} accessibilityLabel={muted ? "Unmute music" : "Mute music"}>
+          <Ionicons name={muted ? "volume-mute" : "volume-high"} size={20} color={muted ? C.textMuted : C.text} />
+        </Pressable>
+      </View>
+      {maxPlaySec ? (
+        <View style={styles.postMusicTrack}>
+          <View style={[styles.postMusicFill, { width: `${Math.round(progress * 100)}%` }]} />
+        </View>
+      ) : null}
+    </View>
   );
 }
 
-// Plays a story's song while that story is on screen.
-function StoryMusic({ music }) {
-  const { isPlaying, toggle } = useClip(music.previewUrl, { loop: true, autoplay: true });
+// A story's song plays by itself while that story is on screen. There is no
+// pause or mute here on purpose -- the pill is display-only.
+function StoryMusic({ music, maxPlaySec }) {
+  const { isPlaying } = useClip(music.previewUrl, {
+    startSec: music.startSec || 0,
+    endSec: music.endSec || null,
+    loop: true,
+    maxPlaySec: maxPlaySec || null,
+    autoplay: true,
+  });
   return (
     <MusicPill
       music={music}
       light
-      onPress={toggle}
-      trailing={<Ionicons name={isPlaying ? "volume-high" : "play"} size={16} color="#fff" />}
+      trailing={<Ionicons name={isPlaying ? "volume-high" : "musical-note"} size={16} color="#fff" />}
     />
   );
 }
 
+// Pick which part of the song to use. The 30s preview is drawn as 30 bars (one
+// per second); the lit-up bars are what will play. Drag (or tap) to move where
+// it starts, or nudge by a second. The play button previews exactly that part.
+function MusicTrimmer({ music, durationSec, onChange, width }) {
+  const seg = musicSegment(music, durationSec);
+  const TW = width - 24;
+  const maxStart = CLIP_SEC - MIN_MUSIC_WINDOW;
+  const setStart = (sec) => onChange(Math.max(0, Math.min(maxStart, Math.round(sec))));
+  const { isPlaying, toggle } = useClip(music.previewUrl, { startSec: seg.start, endSec: seg.end, loop: true, autoplay: false });
+
+  const ref = useRef({});
+  ref.current = { TW, setStart };
+  const grab = useRef(0);
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: (e) => { grab.current = e.nativeEvent.locationX; ref.current.setStart((grab.current / ref.current.TW) * CLIP_SEC); },
+      onPanResponderMove: (_, g) => ref.current.setStart(((grab.current + g.dx) / ref.current.TW) * CLIP_SEC),
+    })
+  ).current;
+
+  // Deterministic "waveform" so each song always looks the same.
+  const seed = Array.from(String(music.trackId || music.title || "x")).reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
+  const bars = Array.from({ length: CLIP_SEC }, (_, i) => {
+    const r = Math.sin(seed * 0.001 + i * 1.7) * 43758.5453;
+    return 10 + Math.round((r - Math.floor(r)) * 26);
+  });
+
+  return (
+    <View style={styles.trimBox}>
+      <View style={styles.trimHeader}>
+        <Pressable style={styles.trimPlay} onPress={toggle} hitSlop={8}>
+          <Ionicons name={isPlaying ? "pause" : "play"} size={16} color={C.white} />
+        </Pressable>
+        <Text style={styles.trimText} numberOfLines={1}>Plays {fmtClock(seg.start)} to {fmtClock(seg.end)}</Text>
+        <View style={{ flex: 1 }} />
+        <Pressable style={styles.trimNudge} onPress={() => setStart(seg.start - 1)} hitSlop={6}><Ionicons name="remove" size={18} color={C.text} /></Pressable>
+        <Pressable style={styles.trimNudge} onPress={() => setStart(seg.start + 1)} hitSlop={6}><Ionicons name="add" size={18} color={C.text} /></Pressable>
+      </View>
+      <View {...pan.panHandlers} style={[styles.trimTrack, { width: TW }]}>
+        {bars.map((h, i) => (
+          <View
+            key={i}
+            pointerEvents="none"
+            style={{ width: TW / CLIP_SEC - 2, marginHorizontal: 1, height: h, borderRadius: 2, backgroundColor: i >= seg.start && i < seg.end ? C.accent : C.textFaint, opacity: i >= seg.start && i < seg.end ? 1 : 0.45 }}
+          />
+        ))}
+      </View>
+      <Text style={styles.trimHint}>Drag to choose the part of the song to use. It repeats if that part is shorter than the length you picked.</Text>
+    </View>
+  );
+}
+
 // Step between editing the photo and posting: add text stickers and music.
-function DecorateStep({ edited, overlays, setOverlays, music, setMusic, authedApi, title, nextLabel, busy, onBack, onNext }) {
+function DecorateStep({ edited, overlays, setOverlays, music, setMusic, isVideo, videoSec, isStory, duration, setDuration, authedApi, title, nextLabel, busy, onBack, onNext }) {
   const [selectedId, setSelectedId] = useState(null);
   const [musicOpen, setMusicOpen] = useState(false);
   const ratio = Math.min(2, Math.max(0.5, (edited.width && edited.height) ? edited.width / edited.height : 1));
@@ -3016,9 +3304,23 @@ function DecorateStep({ edited, overlays, setOverlays, music, setMusic, authedAp
             <Text style={styles.editToolText}>Music</Text>
           </Pressable>
         </View>
+        {!isVideo && (
+          <View style={[styles.durationBlock, { width: EDIT_W }]}>
+            <Text style={styles.durationLabel}>{isStory ? "How long your story shows" : "How long your post plays"}</Text>
+            <View style={styles.durationRow}>
+              {(isStory ? STORY_PHOTO_SECONDS : POST_PHOTO_SECONDS).map((sec) => (
+                <Pressable key={sec} style={[styles.editChip, duration === sec && styles.editChipActive]} onPress={() => setDuration(sec)}>
+                  <Text style={[styles.editChipText, duration === sec && { color: C.white }]}>{sec}s</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        )}
+        {isVideo && <Text style={[styles.roomInfo, { marginTop: 10 }]}>Video length {videoSec ? fmtClock(videoSec) : "up to 1:00"} (max 1:00)</Text>}
         {music && (
-          <View style={{ marginTop: 10, maxWidth: EDIT_W }}>
+          <View style={{ marginTop: 10, width: EDIT_W }}>
             <MusicPill music={music} onRemove={() => setMusic(null)} />
+            <MusicTrimmer music={music} durationSec={isVideo ? (videoSec || MAX_VIDEO_SEC) : duration} onChange={(startSec) => setMusic({ ...music, startSec })} width={EDIT_W} />
           </View>
         )}
         {!selected && overlays.length > 0 && <Text style={[styles.roomInfo, { marginTop: 10 }]}>Drag text to move it. Tap to edit.</Text>}
@@ -3059,7 +3361,7 @@ function DecorateStep({ edited, overlays, setOverlays, music, setMusic, authedAp
           </View>
         )}
       </ScrollView>
-      <MusicPicker visible={musicOpen} authedApi={authedApi} onClose={() => setMusicOpen(false)} onPick={setMusic} />
+      <MusicPicker visible={musicOpen} authedApi={authedApi} onClose={() => setMusicOpen(false)} onPick={(t) => setMusic({ ...t, startSec: 0 })} />
     </KeyboardAvoidingView>
   );
 }
@@ -3107,8 +3409,8 @@ function StoriesBar({ groups, onView, onAdd }) {
   );
 }
 
-function StoryVideo({ uri, onDuration }) {
-  const player = useVideoPlayer(uri, (p) => { if (p) { p.loop = false; p.play(); } });
+function StoryVideo({ uri, onDuration, muted = false }) {
+  const player = useVideoPlayer(uri, (p) => { if (p) { p.loop = false; p.muted = muted; p.play(); } });
   useEffect(() => {
     if (!player || !player.addListener) return;
     const sub = player.addListener("sourceLoad", (e) => { if (e && e.duration) onDuration(e.duration); });
@@ -3154,7 +3456,9 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
   useEffect(() => {
     if (!story || confirmDel) return;
     progress.setValue(0);
-    const ms = isVideo ? (vidDur ? vidDur * 1000 : 15000) : 5000;
+    // Photo stories stay up for the length their author chose (3-15s, 5s if
+    // unset); video stories play for the video's own length, capped at 60s.
+    const ms = isVideo ? (vidDur ? Math.min(vidDur, MAX_VIDEO_SEC) * 1000 : 15000) : Math.min(15, Math.max(3, Number(story.duration) || 5)) * 1000;
     const anim = Animated.timing(progress, { toValue: 1, duration: ms, easing: Easing.linear, useNativeDriver: false });
     anim.start(({ finished }) => { if (finished) next(); });
     return () => anim.stop();
@@ -3183,7 +3487,7 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
                 return (
                   <View style={{ position: "absolute", left: (box.w - fw) / 2, top: (box.h - fh) / 2, width: fw, height: fh, overflow: "hidden" }}>
                     {isVideo ? (
-                      <StoryVideo key={story.id} uri={story.media.url} onDuration={setVidDur} />
+                      <StoryVideo key={story.id} uri={story.media.url} onDuration={setVidDur} muted={!!story.music} />
                     ) : (
                       <Image source={{ uri: story.media?.url }} style={StyleSheet.absoluteFill} resizeMode="cover" />
                     )}
@@ -3221,7 +3525,7 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
             </View>
             {story.music && (
               <View pointerEvents="box-none" style={styles.storyMusicWrap}>
-                <StoryMusic key={story.id} music={story.music} />
+                <StoryMusic key={story.id} music={story.music} maxPlaySec={isVideo ? null : Math.min(15, Math.max(3, Number(story.duration) || 5))} />
               </View>
             )}
             {(!!story.text || isMine) && (
@@ -3487,6 +3791,7 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [bioModalOpen, setBioModalOpen] = useState(false);
   const [editingPost, setEditingPost] = useState(null);
+  const activePost = useActivePost(settingsOpen || bioModalOpen || !!editingPost);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [cropAsset, setCropAsset] = useState(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
@@ -3565,9 +3870,12 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
         contentContainerStyle={{ paddingBottom: 24 }}
         data={posts}
         keyExtractor={(item) => item.id}
+        extraData={activePost.activeId}
+        onViewableItemsChanged={activePost.onViewableItemsChanged}
+        viewabilityConfig={activePost.viewabilityConfig}
         renderItem={({ item }) => (
           <View>
-            <PostCard item={item} isOwner me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
+            <PostCard item={item} isActive={item.id === activePost.activeId} isOwner me={me} authedApi={authedApi} onEdit={setEditingPost} onDelete={deletePost} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
           </View>
         )}
         ListHeaderComponent={
@@ -4081,7 +4389,21 @@ function buildStyles(C) {
   musicPillText: { color: C.text, fontSize: 13, fontWeight: "700", flexShrink: 1 },
   storyMusicWrap: { position: "absolute", left: 12, top: 88 },
   postMusicBar: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingBottom: 8, marginTop: -2 },
+  postMusicMain: { flex: 1, flexDirection: "row", alignItems: "center", gap: 8 },
   postMusicText: { color: C.text, fontSize: 13, flex: 1 },
+  postMuteBtn: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: C.surfaceRaised },
+  postMusicTrack: { height: 2, marginHorizontal: 12, marginBottom: 8, borderRadius: 1, backgroundColor: C.surfaceRaised, overflow: "hidden" },
+  postMusicFill: { height: 2, backgroundColor: C.accent },
+  durationBlock: { marginTop: 14 },
+  durationLabel: { color: C.textMuted, fontSize: 12, fontWeight: "700", marginBottom: 8 },
+  durationRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  trimBox: { marginTop: 10, padding: 12, borderRadius: 16, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  trimHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 10 },
+  trimPlay: { width: 32, height: 32, borderRadius: 16, backgroundColor: C.accent, alignItems: "center", justifyContent: "center" },
+  trimText: { color: C.text, fontSize: 13, fontWeight: "700" },
+  trimNudge: { width: 32, height: 32, borderRadius: 16, backgroundColor: C.surfaceRaised, alignItems: "center", justifyContent: "center" },
+  trimTrack: { height: 44, flexDirection: "row", alignItems: "center", alignSelf: "center" },
+  trimHint: { color: C.textMuted, fontSize: 11, marginTop: 8 },
   songRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 8 },
   songArt: { width: 52, height: 52, borderRadius: 8, backgroundColor: C.surfaceRaised },
   songPlay: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accent, alignItems: "center", justifyContent: "center" },
