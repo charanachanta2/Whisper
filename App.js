@@ -282,6 +282,9 @@ function AppRoot() {
   const [selectMode, setSelectMode] = useState(false); // multi-select (for deleting several messages)
   const [selectedIds, setSelectedIds] = useState([]);
   const [deleteManyOpen, setDeleteManyOpen] = useState(false);
+  const [chatBg, setChatBg] = useState(null); // shared wallpaper of the open chat
+  const [bgPickerOpen, setBgPickerOpen] = useState(false);
+  const [bgBusy, setBgBusy] = useState(false);
   const [profileUser, setProfileUser] = useState(null); // someone else's profile that is open
   const openProfile = useCallback((p) => { if (p && p.id) setProfileUser(p); }, []);
   const [chatMenuOpen, setChatMenuOpen] = useState(false); // "Delete chat" sheet in a direct chat
@@ -323,6 +326,10 @@ function AppRoot() {
   // renders and measures items, then lets go as soon as the person scrolls (or after a moment).
   const pinToBottomRef = useRef(false);
   const pinTimerRef = useRef(null);
+  // Is the person reading at the bottom of the chat? New messages only pull the list down when they are
+  // (or when they sent the message themselves) -- otherwise the chat stays exactly where they left it.
+  const nearBottomRef = useRef(true);
+  const roomLoadedRef = useRef(false); // first room_state of this chat already handled
   // Latest screen state for notification callbacks (socket handlers are created once per login).
   const screenRef = useRef(screen);
   // Floating tab bar: hidden while scrolling down, back on scroll up (or tap the little handle).
@@ -572,19 +579,27 @@ function AppRoot() {
     setEditingMsg(null);
     setSelectMode(false);
     setSelectedIds([]);
+    nearBottomRef.current = true;
+    roomLoadedRef.current = false;
+    setChatBg(null);
     socket.emit("join_room", { roomId: activeRoom.id });
 
     const onRoomState = (state) => {
       setMessages(state.messages || []);
       setRoomMembers(state.members || []);
+      setChatBg(state.background || null);
+      // Only the first load of a chat jumps to the newest message. Later room_state events (reconnects,
+      // re-joins) just refresh the data and leave the scroll position alone.
+      if (roomLoadedRef.current) return;
+      roomLoadedRef.current = true;
       pinToBottomRef.current = true;
       clearTimeout(pinTimerRef.current);
-      pinTimerRef.current = setTimeout(() => { pinToBottomRef.current = false; }, 1500);
+      pinTimerRef.current = setTimeout(() => { pinToBottomRef.current = false; }, 1200);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 100);
     };
     const onNewMessage = (m) => {
-      setMessages((old) => [...old, m]);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+      setMessages((old) => (old.some((x) => x.id === m.id) ? old : [...old, m]));
+      if (nearBottomRef.current) setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     };
     const onMembers = (members) => setRoomMembers(members);
     const onErr = (msg) => Alert.alert("Chat", msg);
@@ -622,8 +637,11 @@ function AppRoot() {
     socket.on("message_deleted", onDeleted);
     socket.on("message_reaction", onReaction);
     socket.on("message_edited", onEdited);
+    const onBg = ({ roomId, background }) => { if (roomId === activeRoom.id) setChatBg(background || null); };
+    socket.on("chat_background", onBg);
 
     return () => {
+      socket.off("chat_background", onBg);
       socket.off("message_edited", onEdited);
       socket.emit("leave_room", { roomId: activeRoom.id });
       socket.off("message_deleted", onDeleted);
@@ -810,6 +828,8 @@ function AppRoot() {
   }
 
   function closeRoom() {
+    setBgPickerOpen(false);
+    setChatBg(null);
     setProfileUser(null);
     setEditingMsg(null);
     setSelectMode(false);
@@ -837,6 +857,7 @@ function AppRoot() {
   // left a screen, or false when there is nothing to go back to (the system then handles it, e.g. exits).
   function backStep() {
     if (profileUser) { setProfileUser(null); return "sub"; }
+    if (bgPickerOpen) { setBgPickerOpen(false); return "sub"; }
     if (screen === "chat" && activeRoom) {
       if (menuTarget) { setMenuTarget(null); return "sub"; }
       if (selectMode) { exitSelect(); return "sub"; }
@@ -957,6 +978,35 @@ function AppRoot() {
     socket.timeout(8000).emit("react_message", { roomId: activeRoom.id, messageId: msg.id, emoji }, (err, ack) => {
       if (err || !ack?.ok) Alert.alert("Couldn't react", err ? "The server didn't respond in time." : ack?.error || "Please try again.");
     });
+  }
+  // Chat wallpaper: shared by everyone in the chat, anyone can change it.
+  function applyChatBg(value) {
+    if (!socket || !socketReady || !activeRoom) return Alert.alert("Not connected", "Check your connection and try again.");
+    const prev = chatBg;
+    setChatBg(value);
+    socket.timeout(8000).emit("set_chat_background", { roomId: activeRoom.id, background: value }, (err, ack) => {
+      if (err || !ack?.ok) {
+        setChatBg(prev);
+        Alert.alert("Couldn't change background", err ? "The server didn't respond in time." : ack?.error || "Please try again.");
+      }
+    });
+  }
+  async function pickChatBgPhoto() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return Alert.alert("Permission needed", "Allow photo access to pick a background.");
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.8 });
+    if (result.canceled) return;
+    setBgBusy(true);
+    try {
+      const asset = await prepareImage(result.assets[0], 1600);
+      const uploaded = await uploadAsset(token, { uri: asset.uri, fileName: asset.fileName || "background.jpg", mimeType: asset.mimeType || "image/jpeg" });
+      applyChatBg(`image:${uploaded.url}`);
+      setBgPickerOpen(false);
+    } catch (e) {
+      Alert.alert("Upload failed", e.message || "Could not use that photo.");
+    } finally {
+      setBgBusy(false);
+    }
   }
   function startEdit(msg) {
     if (!canEditMsg(msg, me?.id)) return Alert.alert("Can't edit", "Messages can only be edited within 5 minutes of sending. You can still delete it.");
@@ -1259,6 +1309,7 @@ function AppRoot() {
       <EdgeSwipeBack onBack={closeRoom} enabled={!selectMode}>
       <SafeAreaView style={styles.container}>
         <StatusBar style={C.mode === "light" ? "dark" : "light"} />
+        <ChatBackgroundLayer value={chatBg} />
         {selectMode ? (
           <View style={styles.dmHeader}>
             <Pressable onPress={exitSelect} hitSlop={10} style={{ paddingRight: 2 }} accessibilityLabel="Cancel selection">
@@ -1298,6 +1349,9 @@ function AppRoot() {
                 : `${roomMembers.length} member${roomMembers.length === 1 ? "" : "s"}`}
             </Text>
           </Pressable>
+          <Pressable style={styles.iconButtonSm} onPress={() => setBgPickerOpen(true)} hitSlop={8} accessibilityLabel="Change chat background">
+            <Ionicons name="color-palette-outline" size={24} color={C.text} />
+          </Pressable>
           {!activeRoom.isDirect && <ChatHeaderActions room={activeRoom} authedApi={authedApi} onMembersAdded={setRoomMembers} onShare={shareRoomInvite} />}
           {activeRoom.isDirect && (
             <Pressable style={styles.iconButtonSm} onPress={() => setChatMenuOpen(true)} hitSlop={8}>
@@ -1315,6 +1369,11 @@ function AppRoot() {
           initialNumToRender={30}
           onContentSizeChange={() => { if (pinToBottomRef.current) listRef.current?.scrollToEnd({ animated: false }); }}
           onScrollBeginDrag={() => { pinToBottomRef.current = false; }}
+          onScroll={(e) => {
+            const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+            nearBottomRef.current = contentSize.height - (contentOffset.y + layoutMeasurement.height) < 160;
+          }}
+          scrollEventThrottle={100}
           onScrollToIndexFailed={(info) =>
             listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true })
           }
@@ -1407,6 +1466,14 @@ function AppRoot() {
           </View>
           )}
         </KeyboardAvoidingView>
+        <ChatBackgroundPicker
+          visible={bgPickerOpen}
+          current={chatBg}
+          busy={bgBusy}
+          onClose={() => setBgPickerOpen(false)}
+          onPick={applyChatBg}
+          onPickPhoto={pickChatBgPhoto}
+        />
         <MessageMenu
           target={menuTarget}
           meId={me?.id}
@@ -1590,6 +1657,56 @@ function ReactionChips({ reactions, meId, onMine, onToggle }) {
         </Pressable>
       ))}
     </View>
+  );
+}
+
+// ---- Chat wallpaper (shared by everyone in the chat) ----
+const CHAT_BG_COLORS = [
+  "#0b1020", "#1a1a2e", "#16213e", "#0f3460", "#1b4332", "#2d6a4f",
+  "#4a1942", "#6a040f", "#7f4f24", "#3d405b", "#264653", "#222222",
+  "#f8e1e7", "#e0f2fe", "#e8f5e9", "#fff3cd", "#ede7f6", "#f5f5f5",
+];
+// Draws the wallpaper behind the whole chat. Photos get a soft dark veil so text stays readable.
+function ChatBackgroundLayer({ value }) {
+  if (!value) return null;
+  if (value.startsWith("color:")) return <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: value.slice(6) }]} />;
+  if (value.startsWith("image:")) {
+    return (
+      <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <Image source={{ uri: value.slice(6) }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.28)" }]} />
+      </View>
+    );
+  }
+  return null;
+}
+function ChatBackgroundPicker({ visible, current, busy, onClose, onPick, onPickPhoto }) {
+  if (!visible) return null;
+  const isImage = !!current && current.startsWith("image:");
+  return (
+    <Modal visible animationType="slide" transparent onRequestClose={onClose}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={[styles.modalSheet, { paddingBottom: 24 }]} onPress={() => {}}>
+          <Text style={[styles.sheetRowText, { textAlign: "center", marginBottom: 4 }]}>Chat background</Text>
+          <Text style={[styles.roomInfo, { textAlign: "center", marginBottom: 14 }]}>Everyone in this chat sees it, and anyone can change it.</Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: 12 }}>
+            <Pressable onPress={() => onPick(null)} style={{ width: 54, height: 54, borderRadius: 14, backgroundColor: C.bg, borderWidth: !current ? 3 : 1, borderColor: !current ? C.accent : C.border, alignItems: "center", justifyContent: "center" }} accessibilityLabel="Default background">
+              <Ionicons name="close" size={20} color={C.textMuted} />
+            </Pressable>
+            <Pressable onPress={onPickPhoto} disabled={busy} style={{ width: 54, height: 54, borderRadius: 14, backgroundColor: C.surfaceRaised, borderWidth: isImage ? 3 : 1, borderColor: isImage ? C.accent : C.border, alignItems: "center", justifyContent: "center" }} accessibilityLabel="Use a photo">
+              {busy ? <ActivityIndicator size="small" color={C.text} /> : <Ionicons name="image-outline" size={22} color={C.text} />}
+            </Pressable>
+            {CHAT_BG_COLORS.map((c) => {
+              const on = current === `color:${c}`;
+              return <Pressable key={c} onPress={() => onPick(`color:${c}`)} style={{ width: 54, height: 54, borderRadius: 14, backgroundColor: c, borderWidth: on ? 3 : 1, borderColor: on ? C.accent : C.border }} accessibilityLabel={`Background ${c}`} />;
+            })}
+          </View>
+          <Pressable style={[styles.sheetRow, { justifyContent: "center", marginTop: 12 }]} onPress={onClose}>
+            <Text style={[styles.sheetRowText, { color: C.textMuted }]}>Done</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 

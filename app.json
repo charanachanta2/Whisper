@@ -32,6 +32,17 @@
         "NSPhotoLibraryUsageDescription": "Used to choose photos and videos to share in chats.",
         "NSMicrophoneUsageDescription": "Used for voice rooms."
       }
+    },
+    "android": {
+      "package": "com.yourname.musicchat",
+      "versionCode": 1,
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
+        "VIBRATE"
+      ]
     }
   }
 }

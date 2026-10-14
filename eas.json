@@ -9,6 +9,9 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://YOUR-BACKEND-URL"
       }
     },
     "preview": {
@@ -18,12 +21,26 @@
       },
       "ios": {
         "simulator": false
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://YOUR-BACKEND-URL"
       }
     },
     "production": {
       "autoIncrement": true,
       "ios": {
         "resourceClass": "m-medium"
+      }
+    },
+    "production-apk": {
+      "extends": "production",
+      "distribution": "internal",
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://YOUR-BACKEND-URL"
       }
     }
   },
