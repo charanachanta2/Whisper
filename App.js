@@ -1137,37 +1137,38 @@ function AppRoot() {
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style={C.mode === "light" ? "dark" : "light"} />
-        <View style={styles.header}>
-          <Pressable onPress={closeRoom} hitSlop={10}>
-            <Text style={styles.back}>‹</Text>
+        <View style={styles.dmHeader}>
+          <Pressable onPress={closeRoom} hitSlop={10} style={{ paddingRight: 2 }}>
+            <Ionicons name="chevron-back" size={28} color={C.text} />
           </Pressable>
           {activeRoom.isDirect ? (
-            <UserAvatar name={activeRoom.name} avatarUrl={otherUser?.avatarUrl} thumbUrl={otherUser?.avatarThumbUrl} size={40} />
+            <UserAvatar name={activeRoom.name} avatarUrl={otherUser?.avatarUrl} thumbUrl={otherUser?.avatarThumbUrl} size={36} />
           ) : (
             <View style={[styles.avatarSm, { backgroundColor: colorFor(activeRoom.name || "C") }]}>
               <Text style={styles.avatarText}>{(activeRoom.name || "C")[0].toUpperCase()}</Text>
             </View>
           )}
           <View style={{ flex: 1 }}>
-            <Text style={styles.titleSmall} numberOfLines={1}>{activeRoom.name || "Chat"}</Text>
-            <Text style={styles.roomInfo} numberOfLines={1}>
-              {activeRoom.isDirect
-                ? (otherUser?.username ? `@${otherUser.username}` : "Direct message")
+            <Text style={styles.dmHeaderName} numberOfLines={1}>{activeRoom.name || "Chat"}</Text>
+            <Text style={styles.dmHeaderSub} numberOfLines={1}>
+              {!socketReady
+                ? "Connecting…"
+                : activeRoom.isDirect
+                ? (otherUser?.username ? otherUser.username : "Direct message")
                 : `${roomMembers.length} member${roomMembers.length === 1 ? "" : "s"}`}
             </Text>
           </View>
           {!activeRoom.isDirect && <ChatHeaderActions room={activeRoom} authedApi={authedApi} onMembersAdded={setRoomMembers} onShare={shareRoomInvite} />}
           {activeRoom.isDirect && (
             <Pressable style={styles.iconButtonSm} onPress={() => setChatMenuOpen(true)} hitSlop={8}>
-              <Ionicons name="ellipsis-vertical" size={20} color={C.text} />
+              <Ionicons name="information-circle-outline" size={26} color={C.text} />
             </Pressable>
           )}
-          <Text style={[styles.live, socketReady && styles.liveOn]}>{socketReady ? "● LIVE" : "○ …"}</Text>
         </View>
 
         <FlatList
           ref={listRef}
-          style={styles.chat}
+          style={styles.dmChat}
           data={messages}
           keyExtractor={(item) => item.id}
           initialNumToRender={30}
@@ -1176,42 +1177,50 @@ function AppRoot() {
           onScrollToIndexFailed={(info) =>
             listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true })
           }
-          renderItem={({ item }) => (
-            <Pressable
-              delayLongPress={350}
-              onLongPress={() => setActionMsg(item)}
-              style={[styles.message, item.userId === me?.id && styles.myMessage]}
-            >
-              {item.userId !== me?.id && (
-                <View style={styles.postHeader}>
-                  <UserAvatar
-                    name={memberById[item.userId]?.name || item.userName}
-                    avatarUrl={memberById[item.userId]?.avatarUrl}
-                    thumbUrl={memberById[item.userId]?.avatarThumbUrl}
-                    size={26}
-                    style={{ marginRight: 8 }}
-                  />
-                  <Text style={styles.messageUser}>{memberById[item.userId]?.name || item.userName}</Text>
+          contentContainerStyle={{ paddingVertical: 12, paddingHorizontal: 10 }}
+          renderItem={({ item, index }) => {
+            const mine = item.userId === me?.id;
+            const prev = messages[index - 1];
+            const next = messages[index + 1];
+            const joinsPrev = !!prev && prev.userId === item.userId && !dmGap(prev, item);
+            const joinsNext = !!next && next.userId === item.userId && !dmGap(item, next);
+            const showTime = dmGap(prev, item);
+            const isMedia = item.type === "media";
+            const who = memberById[item.userId];
+            const bubbleShape = mine
+              ? { borderTopRightRadius: joinsPrev ? 6 : 22, borderBottomRightRadius: joinsNext ? 6 : 22 }
+              : { borderTopLeftRadius: joinsPrev ? 6 : 22, borderBottomLeftRadius: joinsNext ? 6 : 22 };
+            return (
+              <View>
+                {showTime && <Text style={styles.dmTimeSep}>{dmTimeLabel(item.createdAt)}</Text>}
+                <View style={[styles.dmRow, mine && styles.dmRowMine, { marginTop: joinsPrev ? 2 : 10 }]}>
+                  {!mine && (
+                    <View style={styles.dmAvatarCol}>
+                      {!joinsNext ? <UserAvatar name={who?.name || item.userName} avatarUrl={who?.avatarUrl} thumbUrl={who?.avatarThumbUrl} size={28} /> : null}
+                    </View>
+                  )}
+                  <View style={{ maxWidth: "76%", alignItems: mine ? "flex-end" : "flex-start" }}>
+                    {!mine && !activeRoom.isDirect && !joinsPrev ? <Text style={styles.dmSender}>{who?.name || item.userName}</Text> : null}
+                    <Pressable
+                      delayLongPress={300}
+                      onLongPress={() => setActionMsg(item)}
+                      style={[styles.dmBubble, mine ? styles.dmBubbleMine : styles.dmBubbleTheirs, isMedia && styles.dmBubbleMedia, bubbleShape]}
+                    >
+                      {item.replyTo ? (
+                        <ReplyQuote reply={item.replyTo} meId={me?.id} onMine={mine} onPress={() => scrollToMessage(item.replyTo.id)} />
+                      ) : null}
+                      <MessageBody item={item} isMe={mine} />
+                    </Pressable>
+                    {Array.isArray(item.reactions) && item.reactions.length > 0 && (
+                      <View style={[styles.dmReactions, mine ? { marginRight: 10 } : { marginLeft: 10 }]}>
+                        <ReactionChips reactions={item.reactions} meId={me?.id} onMine={false} onToggle={(emoji) => reactTo(item, emoji)} />
+                      </View>
+                    )}
+                  </View>
                 </View>
-              )}
-              {item.replyTo ? (
-                <ReplyQuote reply={item.replyTo} meId={me?.id} onMine={item.userId === me?.id} onPress={() => scrollToMessage(item.replyTo.id)} />
-              ) : null}
-              <MessageBody item={item} isMe={item.userId === me?.id} />
-              <View style={styles.bubbleFooter}>
-                <Pressable hitSlop={10} onPress={() => setActionMsg(item)}>
-                  <Ionicons name="ellipsis-horizontal" size={16} color={item.userId === me?.id ? "rgba(255,255,255,0.7)" : C.textFaint} />
-                </Pressable>
-                <Text style={[styles.time, item.userId === me?.id && styles.myTime, { marginTop: 0 }]}>
-                  {new Date(item.createdAt).toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </Text>
               </View>
-              <ReactionChips reactions={item.reactions} meId={me?.id} onMine={item.userId === me?.id} onToggle={(emoji) => reactTo(item, emoji)} />
-            </Pressable>
-          )}
+            );
+          }}
           ListEmptyComponent={
             <Text style={styles.empty}>
               No messages yet. Start the conversation.
@@ -1235,63 +1244,32 @@ function AppRoot() {
               </Pressable>
             </View>
           ) : null}
-          <View style={styles.attachRow}>
-            <Pressable style={styles.plusButton} onPress={toggleAttachMenu} disabled={uploading} hitSlop={6}>
-              {uploading ? (
-                <ActivityIndicator size="small" color={C.white} />
+          <View style={styles.dmComposer}>
+            <View style={styles.dmInputPill}>
+              <Pressable style={styles.dmCamBtn} onPress={() => pickWith(pickPhoto)} disabled={uploading} hitSlop={6} accessibilityLabel="Send a photo or video">
+                {uploading ? <ActivityIndicator size="small" color={C.white} /> : <Ionicons name="camera" size={18} color={C.white} />}
+              </Pressable>
+              <TextInput
+                style={styles.dmInput}
+                value={message}
+                onChangeText={setMessage}
+                placeholder="Message…"
+                placeholderTextColor={C.textFaint}
+                onSubmitEditing={() => sendMessage("text")}
+                onFocus={closeAttachMenu}
+                returnKeyType="send"
+              />
+              {message.trim().length > 0 ? (
+                <Pressable onPress={() => sendMessage("text")} hitSlop={8}>
+                  <Text style={styles.dmSendText}>Send</Text>
+                </Pressable>
               ) : (
-                <Animated.Text
-                  style={[
-                    styles.plusIcon,
-                    {
-                      transform: [
-                        {
-                          rotate: attachAnim.interpolate({
-                            inputRange: [0, 1],
-                            outputRange: ["0deg", "45deg"],
-                          }),
-                        },
-                      ],
-                    },
-                  ]}
-                >
-                  +
-                </Animated.Text>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+                  <Pressable onPress={() => pickWith(pickAudio)} hitSlop={8} accessibilityLabel="Send audio"><Ionicons name="musical-notes-outline" size={23} color={C.text} /></Pressable>
+                  <Pressable onPress={() => pickWith(pickFile)} hitSlop={8} accessibilityLabel="Send a file"><Ionicons name="attach-outline" size={24} color={C.text} /></Pressable>
+                </View>
               )}
-            </Pressable>
-            <Animated.View
-              pointerEvents={attachOpen ? "auto" : "none"}
-              style={[
-                styles.attachOptionsRow,
-                {
-                  width: attachAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 148] }),
-                  opacity: attachAnim,
-                },
-              ]}
-            >
-              <Pressable style={styles.attachOption} onPress={() => pickWith(pickPhoto)}>
-                <Ionicons name="image-outline" size={19} color={C.text} />
-              </Pressable>
-              <Pressable style={styles.attachOption} onPress={() => pickWith(pickFile)}>
-                <Ionicons name="attach-outline" size={19} color={C.text} />
-              </Pressable>
-              <Pressable style={styles.attachOption} onPress={() => pickWith(pickAudio)}>
-                <Ionicons name="musical-notes-outline" size={19} color={C.text} />
-              </Pressable>
-            </Animated.View>
-            <TextInput
-              style={styles.messageInput}
-              value={message}
-              onChangeText={setMessage}
-              placeholder="Message…"
-              placeholderTextColor={C.textFaint}
-              onSubmitEditing={() => sendMessage("text")}
-              onFocus={closeAttachMenu}
-              returnKeyType="send"
-            />
-            <Pressable style={styles.send} onPress={() => sendMessage("text")}>
-              <Text style={styles.buttonText}>Send</Text>
-            </Pressable>
+            </View>
           </View>
         </KeyboardAvoidingView>
         <MessageActions
@@ -1406,6 +1384,19 @@ function quoteText(m) {
 }
 
 // The small quoted block shown at the top of a reply bubble. Tap to jump to the original.
+// Instagram-style time separators: shown when more than 30 minutes passed since the previous message.
+const DM_GAP_MS = 30 * 60 * 1000;
+function dmGap(a, b) { return !a || !b || new Date(b.createdAt) - new Date(a.createdAt) > DM_GAP_MS; }
+function dmTimeLabel(iso) {
+  const d = new Date(iso), now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const days = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (days <= 0) return time;
+  if (days === 1) return `Yesterday ${time}`;
+  if (days < 7) return `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}
+
 function ReplyQuote({ reply, meId, onMine, onPress }) {
   const deleted = reply.type === "deleted";
   return (
@@ -1831,10 +1822,13 @@ function StoryViewersSheet({ visible, viewers, onClose }) {
 }
 
 // Followers / following lists opened from the profile counts.
-function ConnectionsModal({ visible, initialTab, data, loading, onClose }) {
+function ConnectionsModal({ visible, initialTab, data, loading, onClose, authedApi, onChanged }) {
   const [tab, setTab] = useState("followers");
   useEffect(() => { if (visible) setTab(initialTab || "followers"); }, [visible, initialTab]);
   const list = (tab === "followers" ? data.followers : data.following) || [];
+  async function removeFollower(u) {
+    try { await authedApi(`/api/followers/${u.id}`, { method: "DELETE" }); onChanged && onChanged(); } catch (_) {}
+  }
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
@@ -1857,11 +1851,17 @@ function ConnectionsModal({ visible, initialTab, data, loading, onClose }) {
                 <Text style={styles.accountName} numberOfLines={1}>{item.name}</Text>
                 <Text style={styles.roomInfo} numberOfLines={1}>@{item.username}</Text>
               </View>
+              <FollowButton person={item} authedApi={authedApi} onChange={() => onChanged && onChanged()} />
+              {tab === "followers" && (
+                <Pressable onPress={() => removeFollower(item)} hitSlop={8} style={{ paddingLeft: 10 }} accessibilityLabel="Remove follower">
+                  <Ionicons name="close" size={18} color={C.textMuted} />
+                </Pressable>
+              )}
             </View>
           )}
           ListEmptyComponent={loading ? <ActivityIndicator style={{ marginTop: 30 }} /> : (
             <Text style={styles.empty}>
-              {tab === "followers" ? "No followers yet.\nPeople whose requests you accept appear here." : "You're not following anyone yet.\nPeople who accept your request appear here."}
+              {tab === "followers" ? "No followers yet.\nPeople who follow you appear here." : "You're not following anyone yet.\nFind people in Discover."}
             </Text>
           )}
         />
@@ -1910,7 +1910,7 @@ function ChatsTab({ authedApi, onOpen, onMessage, onOpenVoice, refreshKey, unrea
     let off = false;
     (async () => {
       try {
-        const res = await authedApi("/api/friends");
+        const res = await authedApi("/api/friends?scope=chat");
         const data = await res.json().catch(() => ({}));
         if (!off) setFriends(res.ok ? data.friends || [] : []);
       } catch (_) { if (!off) setFriends([]); }
@@ -1984,7 +1984,7 @@ function ChatsTab({ authedApi, onOpen, onMessage, onOpenVoice, refreshKey, unrea
   return (
     <View style={{ flex: 1 }}>
       <View style={[styles.header, styles.profileHeaderRow]}>
-        <Text style={styles.titleSmall}>Chats</Text>
+        <Text style={styles.titleSmall}>Messages</Text>
         <Pressable style={styles.gearButton} onPress={onOpenNotifications} hitSlop={8}>
           <Ionicons name={unread > 0 ? "notifications" : "notifications-outline"} size={19} color={C.text} />
           {unread > 0 && (
@@ -2014,7 +2014,7 @@ function ChatsTab({ authedApi, onOpen, onMessage, onOpenVoice, refreshKey, unrea
             style={styles.chatSearchInput}
             value={search}
             onChangeText={setSearch}
-            placeholder="Search a friend by name"
+            placeholder="Search"
             placeholderTextColor={C.textFaint}
             autoCapitalize="none"
             autoCorrect={false}
@@ -2052,7 +2052,7 @@ function ChatsTab({ authedApi, onOpen, onMessage, onOpenVoice, refreshKey, unrea
           onScroll={chrome.onScroll}
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ padding: 16, paddingBottom: 16 + TAB_SPACE }}
+          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16 + TAB_SPACE }}
           renderItem={({ item }) => searching ? (
             <Pressable
               style={({ pressed }) => [styles.roomCard, pressed && { opacity: 0.8 }]}
@@ -2067,15 +2067,15 @@ function ChatsTab({ authedApi, onOpen, onMessage, onOpenVoice, refreshKey, unrea
             </Pressable>
           ) : (
             <Pressable
-              style={({ pressed }) => [styles.roomCard, pressed && { opacity: 0.8 }]}
+              style={({ pressed }) => [styles.dmListRow, pressed && { backgroundColor: C.surface }]}
               onPress={() => openItem(item)}
               delayLongPress={350}
               onLongPress={item.isDirect ? () => setDeleteTarget(item) : undefined}
             >
               {item.isDirect && item.otherUser?.avatarUrl ? (
-                <UserAvatar name={item.name} avatarUrl={item.otherUser.avatarUrl} thumbUrl={item.otherUser.avatarThumbUrl} size={48} />
+                <UserAvatar name={item.name} avatarUrl={item.otherUser.avatarUrl} thumbUrl={item.otherUser.avatarThumbUrl} size={56} />
               ) : (
-              <View style={[styles.avatar, { backgroundColor: colorFor(item.name || "C") }]}>
+              <View style={[styles.avatar, { width: 56, height: 56, borderRadius: 28, backgroundColor: colorFor(item.name || "C") }]}>
                 {item.isVoice ? (
                   <Ionicons name="mic" size={18} color={C.white} />
                 ) : (
@@ -2084,12 +2084,12 @@ function ChatsTab({ authedApi, onOpen, onMessage, onOpenVoice, refreshKey, unrea
               </View>
               )}
               <View style={{ flex: 1 }}>
-                <Text style={styles.roomTitle}>{item.name}</Text>
-                <Text style={styles.roomInfo} numberOfLines={1}>
+                <Text style={styles.dmListName} numberOfLines={1}>{item.name}</Text>
+                <Text style={styles.dmListPreview} numberOfLines={1}>
                   {item.isVoice
                     ? `${item.memberCount} member(s) · tap to join`
                     : item.lastMessage
-                    ? `${item.lastMessage.userName}: ${item.lastMessage.type === "text" ? item.lastMessage.text : "sent an attachment"}`
+                    ? `${item.isDirect ? (item.lastMessage.userName === item.name ? "" : "You: ") : `${item.lastMessage.userName}: `}${item.lastMessage.type === "text" ? item.lastMessage.text : item.isDirect && item.lastMessage.userName === item.name ? "Sent an attachment" : "Sent an attachment"}${item.lastMessage.createdAt ? ` · ${timeAgo(item.lastMessage.createdAt)}` : ""}`
                     : item.isDirect
                     ? "Say hi 👋"
                     : `${item.memberCount} member(s)`}
@@ -2264,68 +2264,87 @@ function VoiceRoomScreen({ room, socket, socketReady, me, onClose }) {
   );
 }
 
+// Follow / Following / Follow back. "Follow back" shows when they follow you and you don't follow them yet.
+function FollowButton({ person, authedApi, onChange, style }) {
+  const [st, setSt] = useState({ followedByMe: !!person.followedByMe, followsMe: !!person.followsMe });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setSt({ followedByMe: !!person.followedByMe, followsMe: !!person.followsMe }); }, [person.id, person.followedByMe, person.followsMe]);
+  async function call(method) {
+    setBusy(true);
+    try {
+      const res = await authedApi(`/api/follow/${person.id}`, { method });
+      if (res.status === 401) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return Alert.alert("Couldn't update", data.error || "Something went wrong.");
+      const next = { followedByMe: !!data.user?.followedByMe, followsMe: !!data.user?.followsMe };
+      setSt(next);
+      onChange && onChange({ ...person, ...next });
+    } catch (_) {
+      Alert.alert("Network error", "Check your connection and try again.");
+    } finally { setBusy(false); }
+  }
+  function press() {
+    if (!st.followedByMe) return call("POST");
+    Alert.alert(`Unfollow @${person.username}?`, "Their posts and stories will leave your feed.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Unfollow", style: "destructive", onPress: () => call("DELETE") },
+    ]);
+  }
+  const label = st.followedByMe ? "Following" : st.followsMe ? "Follow back" : "Follow";
+  return (
+    <Pressable style={[styles.smallButton, st.followedByMe && styles.smallButtonMuted, busy && { opacity: 0.6 }, style]} disabled={busy} onPress={press}>
+      <Text style={[styles.buttonText, st.followedByMe && styles.smallButtonMutedText]}>{busy ? "…" : label}</Text>
+    </Pressable>
+  );
+}
+
 function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }) {
   const chrome = useContext(ScrollChromeContext);
   const [query, setQuery] = useState("");
   const [people, setPeople] = useState([]);
-  const [incoming, setIncoming] = useState([]);
-  const [sentTo, setSentTo] = useState({});
-  const [acceptingId, setAcceptingId] = useState(null);
+  const [suggested, setSuggested] = useState([]);
+  const [searching, setSearching] = useState(false);
 
-  const load = async () => {
-    const res = await authedApi("/api/friends/requests");
-    if (res.status === 401) return;
-    const data = await res.json();
-    setIncoming(data.incoming || []);
-    onIncomingCountChange?.((data.incoming || []).length);
+  useEffect(() => { onIncomingCountChange?.(0); }, []);
+  useEffect(() => {
+    authedApi("/api/users/suggested").then((r) => (r.ok ? r.json() : { users: [] })).then((d) => setSuggested(d.users || [])).catch(() => {});
+  }, []);
+
+  // Search as you type.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) { setPeople([]); setSearching(false); return; }
+    setSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const res = await authedApi(`/api/users/search?q=${encodeURIComponent(q)}`);
+        if (res.status === 401) return;
+        const data = await res.json();
+        setPeople(data.users || []);
+      } catch (_) {} finally { setSearching(false); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  const patch = (person) => {
+    const upd = (list) => list.map((x) => (x.id === person.id ? { ...x, ...person, connected: !!(person.followedByMe || person.followsMe) } : x));
+    setPeople(upd); setSuggested(upd);
   };
-  useEffect(() => { load().catch(() => Alert.alert("Could not load", "Check that the backend is reachable.")); }, []);
-
-  async function findPeople() {
-    if (!query.trim()) return;
-    const res = await authedApi(`/api/users/search?q=${encodeURIComponent(query.trim())}`);
-    if (res.status === 401) return;
-    const data = await res.json();
-    setPeople(data.users || []);
-  }
-  async function request(person) {
-    const res = await authedApi("/api/friends/requests", {
-      method: "POST",
-      body: JSON.stringify({ userId: person.id, username: person.username }),
-    });
-    if (res.status === 401) return;
-    const data = await res.json();
-    if (!res.ok) return Alert.alert("Couldn't send request", data.error || "Something went wrong.");
-    setSentTo((old) => ({ ...old, [person.id]: true }));
-  }
-  async function decline(requestId) {
-    try {
-      const res = await authedApi(`/api/friends/requests/${requestId}/decline`, { method: "POST" });
-      if (res.status === 401) return;
-      setIncoming((old) => {
-        const next = old.filter((i) => i.id !== requestId);
-        onIncomingCountChange?.(next.length);
-        return next;
-      });
-    } catch (_) { Alert.alert("Network error", "Check your connection and try again."); }
-  }
-  async function accept(requestId) {
-    setAcceptingId(requestId);
-    try {
-      const res = await authedApi(`/api/friends/requests/${requestId}/accept`, { method: "POST" });
-      if (res.status === 401) return;
-      const data = await res.json();
-      if (!res.ok) return Alert.alert("Couldn't accept", data.error || "Something went wrong.");
-      setIncoming((old) => {
-        const next = old.filter((i) => i.id !== requestId);
-        onIncomingCountChange?.(next.length);
-        return next;
-      });
-      onOpenRoom(data.room);
-    } finally {
-      setAcceptingId(null);
-    }
-  }
+  const renderPerson = (person) => (
+    <View key={person.id} style={styles.roomCard}>
+      <UserAvatar name={person.name} avatarUrl={person.avatarUrl} thumbUrl={person.avatarThumbUrl} size={48} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.roomTitle}>{person.name}</Text>
+        <Text style={styles.roomInfo}>@{person.username}{person.followsMe && !person.followedByMe ? " · follows you" : ""}</Text>
+      </View>
+      {(person.followedByMe || person.followsMe) && (
+        <Pressable style={[styles.smallButton, styles.smallButtonMuted, { marginRight: 8 }]} onPress={() => onMessage(person)}>
+          <Text style={[styles.buttonText, styles.smallButtonMutedText]}>Message</Text>
+        </Pressable>
+      )}
+      <FollowButton person={person} authedApi={authedApi} onChange={patch} />
+    </View>
+  );
 
   return (
     <View style={{ flex: 1 }}>
@@ -2336,51 +2355,32 @@ function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }
         onScroll={chrome.onScroll}
         scrollEventThrottle={16}
         contentContainerStyle={{ padding: 16, paddingTop: 0, paddingBottom: 16 + TAB_SPACE }}
+        keyboardShouldPersistTaps="handled"
         ListHeaderComponent={
           <>
             <View style={styles.searchBox}>
-              <TextInput style={styles.inputInline} value={query} onChangeText={setQuery} placeholder="Find a username" placeholderTextColor={C.textFaint} autoCapitalize="none" onSubmitEditing={findPeople} returnKeyType="search" />
-              <Pressable style={styles.smallButton} onPress={findPeople}><Text style={styles.buttonText}>Find</Text></Pressable>
+              <Ionicons name="search" size={18} color={C.textMuted} />
+              <TextInput style={[styles.inputInline, { marginLeft: 8 }]} value={query} onChangeText={setQuery} placeholder="Search people" placeholderTextColor={C.textFaint} autoCapitalize="none" returnKeyType="search" />
+              {searching && <ActivityIndicator size="small" />}
             </View>
-            {people.map((person) => (
-              <View key={person.id} style={styles.roomCard}>
-                <UserAvatar name={person.name} avatarUrl={person.avatarUrl} thumbUrl={person.avatarThumbUrl} size={48} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.roomTitle}>{person.name}</Text>
-                  <Text style={styles.roomInfo}>@{person.username}</Text>
-                </View>
-                {person.connected ? (
-                  <Pressable style={styles.smallButton} onPress={() => onMessage(person)}>
-                    <Text style={styles.buttonText}>Message</Text>
-                  </Pressable>
-                ) : (
-                  <Pressable style={[styles.smallButton, sentTo[person.id] && styles.smallButtonMuted]} disabled={sentTo[person.id]} onPress={() => request(person)}>
-                    <Text style={[styles.buttonText, sentTo[person.id] && styles.smallButtonMutedText]}>{sentTo[person.id] ? "Sent" : "Request"}</Text>
-                  </Pressable>
-                )}
-              </View>
-            ))}
-            {people.length === 0 && query.trim().length > 0 && <Text style={styles.empty}>No one matches "{query}" yet.</Text>}
-
-            {incoming.length > 0 && <Text style={styles.sectionLabel}>Requests</Text>}
-            {incoming.map((item) => (
-              <View key={item.id} style={styles.roomCard}>
-                <UserAvatar name={item.from?.name} avatarUrl={item.from?.avatarUrl} thumbUrl={item.from?.avatarThumbUrl} size={48} />
-                <Text style={[styles.messageText, { flex: 1 }]}>@{item.from?.username} wants to connect</Text>
-                <Pressable style={[styles.smallButton, styles.smallButtonMuted]} disabled={acceptingId === item.id} onPress={() => decline(item.id)}>
-                  <Text style={[styles.buttonText, styles.smallButtonMutedText]}>Decline</Text>
-                </Pressable>
-                <Pressable style={[styles.smallButton, acceptingId === item.id && styles.smallButtonMuted]} disabled={acceptingId === item.id} onPress={() => accept(item.id)}>
-                  <Text style={[styles.buttonText, acceptingId === item.id && styles.smallButtonMutedText]}>{acceptingId === item.id ? "…" : "Accept"}</Text>
-                </Pressable>
-              </View>
-            ))}
+            {query.trim().length > 0 ? (
+              <>
+                {people.map(renderPerson)}
+                {people.length === 0 && !searching && <Text style={styles.empty}>No one matches "{query}" yet.</Text>}
+              </>
+            ) : suggested.length > 0 ? (
+              <>
+                <Text style={styles.sectionLabel}>Suggested for you</Text>
+                {suggested.map(renderPerson)}
+              </>
+            ) : (
+              <Text style={styles.empty}>Search for a name or username to follow people.</Text>
+            )}
           </>
         }
         data={[]}
         keyExtractor={(item) => item.id}
         renderItem={() => null}
-        ListEmptyComponent={incoming.length === 0 && people.length === 0 ? <Text style={styles.empty}>Search for a username to send a friend request.</Text> : null}
       />
     </View>
   );
@@ -2791,7 +2791,7 @@ function EditPostModal({ visible, post, token, authedApi, onClose, onSaved }) {
   );
 }
 
-const NOTIF_ICONS = { message: "chatbubble", friend_request: "person-add", friend_accept: "people", post_like: "heart", post_comment: "chatbubble-ellipses", post_mention: "at", story_mention: "at" };
+const NOTIF_ICONS = { message: "chatbubble", friend_request: "person-add", friend_accept: "people", follow: "person-add", post_like: "heart", post_comment: "chatbubble-ellipses", post_mention: "at", story_mention: "at" };
 
 // The notification inbox (opened from the bell on Home). Everything stays
 // here until the person deletes it; unread ones carry a dot until opened.
@@ -2817,6 +2817,16 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
   }
   useEffect(() => { if (visible) { setDone({}); load(); } }, [visible]);
 
+  async function followBack(n) {
+    setBusyId(n.id);
+    try {
+      const res = await authedApi(`/api/follow/${n.fromUserId}`, { method: "POST" });
+      if (res.status === 401) return;
+      if (!res.ok) { const d = await res.json().catch(() => ({})); return Alert.alert("Couldn't follow", d.error || "Something went wrong."); }
+      setDone((d) => ({ ...d, [n.id]: "followed" }));
+    } catch (_) { Alert.alert("Network error", "Check your connection and try again."); }
+    finally { setBusyId(null); }
+  }
   // Accept or decline a friend request right from the notification. Declining is silent: the sender is never told.
   async function respondRequest(n, action) {
     const requestId = n.requestId || String(n.tag || "").replace(/^friend-/, "");
@@ -2864,7 +2874,7 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
       onUnreadChange(Math.max(0, items.filter((x) => !x.read).length - 1));
       authedApi("/api/notifications/read", { method: "POST", body: JSON.stringify({ ids: [n.id] }) }).catch(() => {});
     }
-    if (n.kind === "friend_request") return; // answered with the buttons on the row itself
+    if (n.kind === "friend_request" || n.kind === "follow") return; // answered with the buttons on the row itself
     onOpenItem(n);
   }
   async function remove(n) {
@@ -2900,7 +2910,7 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
           data={items}
           keyExtractor={(n) => n.id}
           contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}
-          ListEmptyComponent={loading ? <ActivityIndicator style={{ marginTop: 40 }} /> : <Text style={styles.empty}>You're all caught up.{"\n"}Likes, comments, messages and friend requests will show up here.</Text>}
+          ListEmptyComponent={loading ? <ActivityIndicator style={{ marginTop: 40 }} /> : <Text style={styles.empty}>You're all caught up.{"\n"}Likes, comments, messages and new followers will show up here.</Text>}
           renderItem={({ item: n }) => (
             <Pressable style={[styles.notifRow, !n.read && styles.notifRowUnread]} onPress={() => open(n)}>
               <View style={[styles.notifIcon, { backgroundColor: n.kind === "post_like" ? "#E5484D" : C.accent }]}>
@@ -2919,6 +2929,15 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
                     </Pressable>
                     <Pressable style={[styles.notifBtn, busyId === n.id && { opacity: 0.6 }]} disabled={busyId === n.id} onPress={() => respondRequest(n, "decline")}>
                       <Text style={styles.notifBtnText}>Decline</Text>
+                    </Pressable>
+                  </View>
+                ))}
+                {n.kind === "follow" && n.fromUserId && !n.followedBack && (done[n.id] === "followed" ? (
+                  <Text style={styles.notifDone}>✓ You're following them</Text>
+                ) : (
+                  <View style={styles.notifActions}>
+                    <Pressable style={[styles.notifBtn, styles.notifBtnPrimary, busyId === n.id && { opacity: 0.6 }]} disabled={busyId === n.id} onPress={() => followBack(n)}>
+                      <Text style={styles.notifBtnPrimaryText}>{busyId === n.id ? "…" : "Follow back"}</Text>
                     </Pressable>
                   </View>
                 ))}
@@ -3686,7 +3705,7 @@ function DraggableOverlay({ o, W, H, selected, onMove, onTap }) {
 // loops back to startSec when it reaches endSec, and (if maxPlaySec is set)
 // stops once it has played that many seconds in total -- which is how a
 // 15-30s photo post or a 5-15s story gets exactly the music length it needs.
-const CLIP_SEC = 30; // iTunes song previews are 30 seconds long
+const CLIP_SEC = 30; // length assumed for older posts that were saved with a 30-second preview
 const MIN_MUSIC_WINDOW = 5; // shortest part of a song you can pick
 const MAX_VIDEO_SEC = 60; // posts and stories
 const POST_PHOTO_SECONDS = [15, 20, 25, 30];
@@ -3698,10 +3717,12 @@ function fmtClock(sec) {
 }
 // The part of the preview that plays: it starts where the person dragged to
 // and runs for as long as the post is long (up to the end of the preview).
+function songLength(music) { return Math.max(MIN_MUSIC_WINDOW, Math.round((music && music.durationSec) || CLIP_SEC)); }
 function musicSegment(music, durationSec) {
-  const win = Math.min(CLIP_SEC, Math.max(MIN_MUSIC_WINDOW, Math.round(durationSec || CLIP_SEC)));
-  const start = Math.max(0, Math.min(CLIP_SEC - MIN_MUSIC_WINDOW, Math.round((music && music.startSec) || 0)));
-  return { start, end: Math.min(CLIP_SEC, start + win) };
+  const total = songLength(music);
+  const win = Math.min(total, Math.max(MIN_MUSIC_WINDOW, Math.round(durationSec || CLIP_SEC)));
+  const start = Math.max(0, Math.min(total - win, Math.round((music && music.startSec) || 0)));
+  return { start, end: Math.min(total, start + win), total, win };
 }
 
 function createClip(url, opts, cb) {
@@ -3907,18 +3928,34 @@ function MusicPill({ music, onRemove, onPress, light, trailing }) {
   );
 }
 
-// Search Apple's catalogue (through our backend) and pick a 30-second clip.
+// Pick a song. Before you type, it shows songs suggested for you and what's trending right now;
+// genre chips narrow it down, and search covers the whole catalogue. Songs are full length.
 function MusicPicker({ visible, authedApi, onClose, onPick }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
+  const [sections, setSections] = useState([]);
+  const [genres, setGenres] = useState([]);
+  const [genre, setGenre] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [playingId, setPlayingId] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
-  useClip(previewUrl, { loop: false, autoplay: true });
+  useClip(previewUrl, { loop: false, autoplay: true, startSec: 0, maxPlaySec: 30 });
+
+  async function loadBrowse(g) {
+    setLoading(true);
+    try {
+      const res = await authedApi(`/api/music/browse${g ? `?genre=${encodeURIComponent(g)}` : ""}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(data.error || "Couldn't load songs."); setSections([]); }
+      else { setError(""); setSections(data.sections || []); if (data.genres) setGenres(data.genres); }
+    } catch (_) { setError("Check your connection and try again."); }
+    finally { setLoading(false); }
+  }
 
   useEffect(() => {
-    if (!visible) { setPlayingId(null); setPreviewUrl(null); setQuery(""); setResults([]); setError(""); }
+    if (visible) loadBrowse("");
+    else { setPlayingId(null); setPreviewUrl(null); setQuery(""); setResults([]); setError(""); setGenre(""); }
   }, [visible]);
 
   useEffect(() => {
@@ -3937,6 +3974,7 @@ function MusicPicker({ visible, authedApi, onClose, onPick }) {
     return () => clearTimeout(t);
   }, [query]);
 
+  function pickGenre(g) { const next = genre === g ? "" : g; setGenre(next); loadBrowse(next); }
   function togglePreview(t) {
     if (playingId === t.trackId) { setPlayingId(null); setPreviewUrl(null); return; }
     setPlayingId(t.trackId);
@@ -3944,9 +3982,15 @@ function MusicPicker({ visible, authedApi, onClose, onPick }) {
   }
   function choose(t) {
     setPreviewUrl(null);
-    onPick({ trackId: t.trackId, title: t.title, artist: t.artist, artworkUrl: t.artworkUrl, previewUrl: t.previewUrl });
+    onPick({ trackId: t.trackId, title: t.title, artist: t.artist, artworkUrl: t.artworkUrl, previewUrl: t.previewUrl, durationSec: t.durationSec || 30, genre: t.genre || null });
     onClose();
   }
+
+  const searching = query.trim().length > 0;
+  // One flat list: section titles and songs, so a single FlatList scrolls everything.
+  const rows = searching
+    ? results.map((t) => ({ key: `r_${t.trackId}`, track: t }))
+    : sections.flatMap((sec) => [{ key: `h_${sec.id}`, header: sec.title }, ...sec.tracks.map((t) => ({ key: `${sec.id}_${t.trackId}`, track: t }))]);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -3959,40 +4003,42 @@ function MusicPicker({ visible, authedApi, onClose, onPick }) {
         <View style={{ paddingHorizontal: 16 }}>
           <View style={styles.searchBox}>
             <Ionicons name="search" size={18} color={C.textMuted} />
-            <TextInput
-              style={[styles.inputInline, { marginLeft: 8 }]}
-              value={query}
-              onChangeText={setQuery}
-              placeholder="Search songs or artists"
-              placeholderTextColor={C.textFaint}
-              autoFocus
-              returnKeyType="search"
-            />
+            <TextInput style={[styles.inputInline, { marginLeft: 8 }]} value={query} onChangeText={setQuery} placeholder="Search songs or artists" placeholderTextColor={C.textFaint} autoFocus returnKeyType="search" />
             {loading && <ActivityIndicator size="small" />}
           </View>
         </View>
+        {!searching && genres.length > 0 && (
+          <View>
+            <FlatList horizontal showsHorizontalScrollIndicator={false} data={genres} keyExtractor={(g) => g} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 4 }}
+              renderItem={({ item: g }) => (
+                <Pressable onPress={() => pickGenre(g)} style={[styles.genreChip, genre === g && styles.genreChipActive]}>
+                  <Text style={[styles.genreChipText, genre === g && { color: C.white }]}>{g}</Text>
+                </Pressable>
+              )} />
+          </View>
+        )}
         <FlatList
-          data={results}
-          keyExtractor={(t) => t.trackId}
+          data={rows}
+          keyExtractor={(r) => r.key}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ padding: 16 }}
-          ListEmptyComponent={
-            <Text style={styles.empty}>
-              {error || (query.trim() ? (loading ? "" : "No songs found.") : "Search for a song to play a 30-second clip with your post.")}
-            </Text>
-          }
-          renderItem={({ item: t }) => (
-            <Pressable style={styles.songRow} onPress={() => choose(t)}>
-              {t.artworkUrl ? <Image source={{ uri: t.artworkUrl }} style={styles.songArt} /> : <View style={[styles.songArt, { alignItems: "center", justifyContent: "center" }]}><Ionicons name="musical-notes" size={20} color={C.textMuted} /></View>}
-              <View style={{ flex: 1 }}>
-                <Text style={styles.messageUser} numberOfLines={1}>{t.title}</Text>
-                <Text style={styles.roomInfo} numberOfLines={1}>{t.artist}</Text>
-              </View>
-              <Pressable style={styles.songPlay} onPress={() => togglePreview(t)} hitSlop={8}>
-                <Ionicons name={playingId === t.trackId ? "pause" : "play"} size={18} color={C.white} />
+          ListEmptyComponent={<Text style={styles.empty}>{error || (loading ? "" : searching ? "No songs found." : "No songs to show right now.")}</Text>}
+          renderItem={({ item: r }) => {
+            if (r.header) return <Text style={[styles.sectionLabel, { marginTop: 8 }]}>{r.header}</Text>;
+            const t = r.track;
+            return (
+              <Pressable style={styles.songRow} onPress={() => choose(t)}>
+                {t.artworkUrl ? <Image source={{ uri: t.artworkUrl }} style={styles.songArt} /> : <View style={[styles.songArt, { alignItems: "center", justifyContent: "center" }]}><Ionicons name="musical-notes" size={20} color={C.textMuted} /></View>}
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.messageUser} numberOfLines={1}>{t.title}</Text>
+                  <Text style={styles.roomInfo} numberOfLines={1}>{t.artist} · {fmtClock(t.durationSec || 30)}{t.reason ? ` · ${t.reason}` : ""}</Text>
+                </View>
+                <Pressable style={styles.songPlay} onPress={() => togglePreview(t)} hitSlop={8}>
+                  <Ionicons name={playingId === t.trackId ? "pause" : "play"} size={18} color={C.white} />
+                </Pressable>
               </Pressable>
-            </Pressable>
-          )}
+            );
+          }}
         />
       </SafeAreaView>
     </Modal>
@@ -4054,35 +4100,45 @@ function StoryMusic({ music, maxPlaySec }) {
   );
 }
 
-// Pick which part of the song to use. The 30s preview is drawn as 30 bars (one
-// per second); the lit-up bars are what will play. Drag (or tap) to move where
-// it starts, or nudge by a second. The play button previews exactly that part.
+// Pick which part of the song to use, anywhere in the full track. The whole song is drawn as a waveform;
+// the lit-up part is what will play (as long as the post/story). Drag to slide it, or nudge it with + / -.
+// The play button previews exactly that part.
+const TRIM_BARS = 56;
 function MusicTrimmer({ music, durationSec, onChange, width }) {
   const seg = musicSegment(music, durationSec);
   const TW = width - 24;
-  const maxStart = CLIP_SEC - MIN_MUSIC_WINDOW;
+  const maxStart = Math.max(0, seg.total - seg.win);
+  const step = seg.total > 90 ? 5 : 1;
   const setStart = (sec) => onChange(Math.max(0, Math.min(maxStart, Math.round(sec))));
   const { isPlaying, toggle } = useClip(music.previewUrl, { startSec: seg.start, endSec: seg.end, loop: true, autoplay: false });
 
   const ref = useRef({});
-  ref.current = { TW, setStart };
-  const grab = useRef(0);
+  ref.current = { TW, setStart, total: seg.total, win: seg.win, start: seg.start };
+  const startAtGrab = useRef(0);
   const pan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: (e) => { grab.current = e.nativeEvent.locationX; ref.current.setStart((grab.current / ref.current.TW) * CLIP_SEC); },
-      onPanResponderMove: (_, g) => ref.current.setStart(((grab.current + g.dx) / ref.current.TW) * CLIP_SEC),
+      onPanResponderGrant: (e) => {
+        const r = ref.current;
+        const t = (e.nativeEvent.locationX / r.TW) * r.total;
+        const inside = t >= r.start && t <= r.start + r.win;
+        // Tap outside the lit part: jump there (centred on the finger). Inside: drag it from where it is.
+        if (!inside) r.setStart(t - r.win / 2);
+        startAtGrab.current = inside ? r.start : Math.max(0, Math.min(Math.max(0, r.total - r.win), Math.round(t - r.win / 2)));
+      },
+      onPanResponderMove: (_, g) => { const r = ref.current; r.setStart(startAtGrab.current + (g.dx / r.TW) * r.total); },
     })
   ).current;
 
   // Deterministic "waveform" so each song always looks the same.
   const seed = Array.from(String(music.trackId || music.title || "x")).reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
-  const bars = Array.from({ length: CLIP_SEC }, (_, i) => {
+  const bars = Array.from({ length: TRIM_BARS }, (_, i) => {
     const r = Math.sin(seed * 0.001 + i * 1.7) * 43758.5453;
     return 10 + Math.round((r - Math.floor(r)) * 26);
   });
+  const barSec = seg.total / TRIM_BARS;
 
   return (
     <View style={styles.trimBox}>
@@ -4090,21 +4146,18 @@ function MusicTrimmer({ music, durationSec, onChange, width }) {
         <Pressable style={styles.trimPlay} onPress={toggle} hitSlop={8}>
           <Ionicons name={isPlaying ? "pause" : "play"} size={16} color={C.white} />
         </Pressable>
-        <Text style={styles.trimText} numberOfLines={1}>Plays {fmtClock(seg.start)} to {fmtClock(seg.end)}</Text>
+        <Text style={styles.trimText} numberOfLines={1}>Plays {fmtClock(seg.start)} to {fmtClock(seg.end)} of {fmtClock(seg.total)}</Text>
         <View style={{ flex: 1 }} />
-        <Pressable style={styles.trimNudge} onPress={() => setStart(seg.start - 1)} hitSlop={6}><Ionicons name="remove" size={18} color={C.text} /></Pressable>
-        <Pressable style={styles.trimNudge} onPress={() => setStart(seg.start + 1)} hitSlop={6}><Ionicons name="add" size={18} color={C.text} /></Pressable>
+        <Pressable style={styles.trimNudge} onPress={() => setStart(seg.start - step)} hitSlop={6}><Ionicons name="remove" size={18} color={C.text} /></Pressable>
+        <Pressable style={styles.trimNudge} onPress={() => setStart(seg.start + step)} hitSlop={6}><Ionicons name="add" size={18} color={C.text} /></Pressable>
       </View>
       <View {...pan.panHandlers} style={[styles.trimTrack, { width: TW }]}>
-        {bars.map((h, i) => (
-          <View
-            key={i}
-            pointerEvents="none"
-            style={{ width: TW / CLIP_SEC - 2, marginHorizontal: 1, height: h, borderRadius: 2, backgroundColor: i >= seg.start && i < seg.end ? C.accent : C.textFaint, opacity: i >= seg.start && i < seg.end ? 1 : 0.45 }}
-          />
-        ))}
+        {bars.map((h, i) => {
+          const lit = (i + 1) * barSec > seg.start && i * barSec < seg.end;
+          return <View key={i} pointerEvents="none" style={{ width: TW / TRIM_BARS - 2, marginHorizontal: 1, height: h, borderRadius: 2, backgroundColor: lit ? C.accent : C.textFaint, opacity: lit ? 1 : 0.45 }} />;
+        })}
       </View>
-      <Text style={styles.trimHint}>Drag to choose the part of the song to use. It repeats if that part is shorter than the length you picked.</Text>
+      <Text style={styles.trimHint}>Drag to choose any part of the song. It repeats if that part is shorter than the length you picked.</Text>
     </View>
   );
 }
@@ -4791,7 +4844,7 @@ function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAcc
   const [cropAsset, setCropAsset] = useState(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
   useEffect(() => { setAvatarFailed(false); }, [me?.avatarUrl]);
-  // Followers = people whose request I accepted; following = people who accepted mine.
+  // Followers = people who follow me; following = people I follow.
   const [conn, setConn] = useState({ followers: [], following: [], followersCount: 0, followingCount: 0 });
   const [connLoading, setConnLoading] = useState(true);
   const [connOpen, setConnOpen] = useState(null); // null | "followers" | "following"
@@ -4974,7 +5027,7 @@ function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAcc
         onSaved={onUpdateMe}
       />
       <AvatarCropModal asset={cropAsset} onCancel={() => setCropAsset(null)} onDone={uploadCropped} />
-      <ConnectionsModal visible={!!connOpen} initialTab={connOpen} data={conn} loading={connLoading} onClose={() => setConnOpen(null)} />
+      <ConnectionsModal visible={!!connOpen} initialTab={connOpen} data={conn} loading={connLoading} onClose={() => setConnOpen(null)} authedApi={authedApi} onChanged={loadConnections} />
       <EditPostModal
         visible={!!editingPost}
         post={editingPost}
@@ -5329,6 +5382,32 @@ function buildStyles(C) {
     marginTop: 6,
   },
   smallButtonMuted: { backgroundColor: C.surfaceRaised },
+  // Instagram-style direct messages
+  dmHeader: { paddingHorizontal: 10, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border, backgroundColor: C.bg },
+  dmHeaderName: { color: C.text, fontWeight: "700", fontSize: 16 },
+  dmHeaderSub: { color: C.textMuted, fontSize: 12, marginTop: 1 },
+  dmChat: { flex: 1 },
+  dmTimeSep: { alignSelf: "center", color: C.textMuted, fontSize: 12, marginTop: 14, marginBottom: 6 },
+  dmRow: { flexDirection: "row", alignItems: "flex-end" },
+  dmRowMine: { justifyContent: "flex-end" },
+  dmAvatarCol: { width: 34, alignItems: "flex-start", justifyContent: "flex-end" },
+  dmSender: { color: C.textMuted, fontSize: 11, marginLeft: 12, marginBottom: 2 },
+  dmBubble: { paddingVertical: 9, paddingHorizontal: 14, borderRadius: 22, overflow: "hidden" },
+  dmBubbleMine: { backgroundColor: C.accent },
+  dmBubbleTheirs: { backgroundColor: C.surfaceRaised },
+  dmBubbleMedia: { padding: 0, borderRadius: 20, backgroundColor: "transparent" },
+  dmReactions: { marginTop: -8 },
+  dmComposer: { paddingHorizontal: 12, paddingVertical: 8 },
+  dmInputPill: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 48, borderRadius: 26, paddingLeft: 6, paddingRight: 16, backgroundColor: C.surfaceRaised },
+  dmCamBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accent, alignItems: "center", justifyContent: "center" },
+  dmInput: { flex: 1, color: C.text, fontSize: 16, paddingVertical: 10 },
+  dmSendText: { color: C.accent, fontWeight: "800", fontSize: 16 },
+  dmListRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 9, borderRadius: 12 },
+  dmListName: { color: C.text, fontWeight: "600", fontSize: 15 },
+  dmListPreview: { color: C.textMuted, fontSize: 14, marginTop: 2 },
+  genreChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 16, backgroundColor: C.surfaceRaised, marginRight: 8 },
+  genreChipActive: { backgroundColor: C.accent },
+  genreChipText: { color: C.text, fontSize: 13, fontWeight: "600" },
   smallButtonMutedText: { color: C.textMuted },
   setHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10 },
   setBack: { width: 44, height: 44, borderRadius: 22, backgroundColor: C.surfaceRaised, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: C.border },
@@ -5638,7 +5717,7 @@ function buildStyles(C) {
   viewerTime: { color: C.textFaint, fontSize: 12 },
 
   // -- Chats: search + profile counts --
-  chatSearch: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 16, marginBottom: 6, paddingHorizontal: 12, borderRadius: 14, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  chatSearch: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 16, marginBottom: 6, paddingHorizontal: 14, borderRadius: 22, backgroundColor: C.surfaceRaised },
   chatSearchInput: { flex: 1, color: C.text, paddingVertical: 11, fontSize: 15 },
   rowMenuBtn: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center" },
   statPress: { alignItems: "center", minWidth: 64 },
