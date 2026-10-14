@@ -110,6 +110,8 @@ async function readAsBase64(uri) {
 
 const TOKEN_KEY = "music_chat_token";
 const USER_KEY = "music_chat_user";
+// Every account signed in on this device (for the account switcher): [{ token, user }].
+const ACCOUNTS_KEY = "hush_accounts";
 // Persists the person's chosen appearance ("system" | "light" | "dark") so
 // it survives app restarts instead of resetting to the default every time.
 const THEME_KEY = "music_chat_theme";
@@ -248,6 +250,12 @@ function AppRoot() {
   const [token, setToken] = useState(null);
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Accounts saved on this device so the person can switch without retyping passwords.
+  const [accounts, setAccounts] = useState([]);
+  const [addingAccount, setAddingAccount] = useState(false);
+  const accountsRef = useRef([]);
+  const meRef = useRef(null);
+  meRef.current = me;
   // "system" | "light" | "dark" -- the saved preference. themeTick just
   // exists to force this component (and everything under it) to re-render
   // after applyTheme() reassigns the module-level C/styles bindings, since
@@ -352,6 +360,11 @@ function AppRoot() {
   useEffect(() => {
     (async () => {
       try {
+        try {
+          const raw = await AsyncStorage.getItem(ACCOUNTS_KEY);
+          const list = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(list)) { accountsRef.current = list.filter((a) => a && a.token && a.user && a.user.id); setAccounts(accountsRef.current); }
+        } catch (_) {}
         const savedToken = await AsyncStorage.getItem(TOKEN_KEY);
         if (!savedToken) return;
         const res = await api("/api/me", {
@@ -540,7 +553,78 @@ function AppRoot() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, activeRoom?.id]);
 
+  // ---- Saved accounts / account switcher ----
+  function persistAccounts(list) {
+    accountsRef.current = list;
+    setAccounts(list);
+    AsyncStorage.setItem(ACCOUNTS_KEY, JSON.stringify(list)).catch(() => {});
+  }
+  function rememberAccount(tok, user) {
+    if (!tok || !user || !user.id) return;
+    const list = accountsRef.current;
+    const i = list.findIndex((a) => a.user.id === user.id);
+    persistAccounts(i >= 0 ? list.map((a, k) => (k === i ? { token: tok, user } : a)) : [...list, { token: tok, user }]);
+  }
+  function removeAccount(userId) { persistAccounts(accountsRef.current.filter((a) => a.user.id !== userId)); }
+  // Keeps the saved copy (name, photo, token) current for whoever is signed in.
+  useEffect(() => { if (token && me) rememberAccount(token, me); }, [token, me]);
+
+  function resetSessionState() {
+    setActiveRoom(null);
+    setActiveVoiceRoom(null);
+    setMessages([]);
+    setRoomMembers([]);
+    setMessage("");
+    setNotifUnread(0);
+    setNotifOpen(false);
+    setIncomingCount(0);
+  }
+
+  // Switches to another saved account. Returns true on success.
+  async function switchAccount(acct, { silent = false } = {}) {
+    if (!acct || !acct.user) return false;
+    if (acct.user.id === meRef.current?.id && token) { setAddingAccount(false); setScreen("main"); return true; }
+    setLoading(true);
+    try {
+      const res = await api("/api/me", { headers: { Authorization: `Bearer ${acct.token}` } });
+      if (res.status === 401) {
+        removeAccount(acct.user.id);
+        if (!silent) Alert.alert("Sign in again", `@${acct.user.username} was signed out. Please sign in to that account again.`);
+        return false;
+      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not switch account.");
+      await AsyncStorage.multiSet([[TOKEN_KEY, acct.token], [USER_KEY, JSON.stringify(data.user)]]);
+      resetSessionState();
+      setToken(acct.token);
+      setMe(data.user);
+      setAddingAccount(false);
+      setScreen("main");
+      setMainTab("home");
+      return true;
+    } catch (e) {
+      if (!silent) Alert.alert("Couldn't switch account", "Check your connection and try again.");
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function addAccount() {
+    setUsername(""); setPassword(""); setName(""); setInviteCode("");
+    setAuthMode("login");
+    setAddingAccount(true);
+    setScreen("auth");
+  }
+  function cancelAddAccount() { setAddingAccount(false); setScreen("main"); }
+
   async function handleExpiredSession() {
+    const expiredId = meRef.current?.id;
+    if (expiredId) removeAccount(expiredId);
+    // Another saved account? Move to it instead of dumping the person at sign-in.
+    for (const a of accountsRef.current.filter((x) => x.user.id !== expiredId)) {
+      if (await switchAccount(a, { silent: true })) { Alert.alert("Session expired", "That account was signed out. Switched to another saved account."); return; }
+    }
     await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
     setToken(null);
     setMe(null);
@@ -606,8 +690,11 @@ function AppRoot() {
 
       await AsyncStorage.setItem(TOKEN_KEY, data.token);
       await AsyncStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      resetSessionState();
       setToken(data.token);
       setMe(data.user);
+      setAddingAccount(false);
+      setPassword("");
       setScreen("main");
       setMainTab("chats");
     } catch (e) {
@@ -812,6 +899,12 @@ function AppRoot() {
   // for an app to read what's playing inside a *different* app without a
   async function logout() {
     try { await disableWebPush(authedApi); } catch (_) {}
+    // Log out of THIS account only; if another is saved on this device, switch to it.
+    const leavingId = meRef.current?.id;
+    if (leavingId) removeAccount(leavingId);
+    for (const a of accountsRef.current.filter((x) => x.user.id !== leavingId)) {
+      if (await switchAccount(a, { silent: true })) return;
+    }
     await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
     socket?.disconnect();
     setToken(null);
@@ -855,6 +948,23 @@ function AppRoot() {
         <Text style={styles.subtitle}>
           Private chats for people you invite.
         </Text>
+
+        {!addingAccount && accounts.length > 0 && (
+          <View style={{ width: "100%", marginBottom: 18 }}>
+            <Text style={styles.sectionLabel}>Saved accounts</Text>
+            {accounts.map((a) => (
+              <Pressable key={a.user.id} style={styles.accountRow} onPress={() => switchAccount(a)}>
+                <UserAvatar name={a.user.name} avatarUrl={a.user.avatarUrl} size={38} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.accountName} numberOfLines={1}>{a.user.name}</Text>
+                  <Text style={styles.roomInfo} numberOfLines={1}>@{a.user.username}</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={C.textMuted} />
+              </Pressable>
+            ))}
+            <Text style={[styles.muted, { textAlign: "center", marginTop: 10 }]}>or sign in to another account</Text>
+          </View>
+        )}
 
         {authMode === "register" && (
           <>
@@ -913,6 +1023,11 @@ function AppRoot() {
               : "Already have an account? Sign in"}
           </Text>
         </Pressable>
+        {addingAccount && (
+          <Pressable onPress={cancelAddAccount} style={{ marginTop: 14 }}>
+            <Text style={styles.link}>Cancel</Text>
+          </Pressable>
+        )}
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -1086,6 +1201,9 @@ function AppRoot() {
             token={token}
             authedApi={authedApi}
             onLogout={logout}
+            accounts={accounts}
+            onSwitchAccount={switchAccount}
+            onAddAccount={addAccount}
             onUpdateMe={setMe}
             themeMode={themeMode}
             onChangeTheme={changeThemeMode}
@@ -1970,6 +2088,12 @@ function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged, i
       <View style={styles.igHeader}>
         <UserAvatar name={item.userName} avatarUrl={item.userAvatarUrl} thumbUrl={item.userAvatarThumbUrl} size={34} style={{ marginRight: 10 }} />
         <Text style={[styles.igName, { flex: 1 }]} numberOfLines={1}>{item.userName}</Text>
+        {isOwner && item.audienceCount != null && (
+          <View style={{ flexDirection: "row", alignItems: "center", marginRight: 6 }}>
+            <Ionicons name="lock-closed-outline" size={14} color={C.textMuted} />
+            <Text style={styles.roomInfo}> {item.audienceCount}</Text>
+          </View>
+        )}
         {isOwner && (
           <Pressable onPress={() => setMenuOpen(true)} hitSlop={10} style={styles.postMenuBtn}>
             <Ionicons name="ellipsis-horizontal" size={20} color={C.text} />
@@ -2560,6 +2684,72 @@ function probeVideoSeconds(uri) {
   });
 }
 
+// "Who can watch": all friends, or only the friends ticked in the list.
+function AudiencePicker({ authedApi, mode, onModeChange, ids, onIdsChange, noun = "post" }) {
+  const [friends, setFriends] = useState(null); // null = loading
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    let off = false;
+    (async () => {
+      try {
+        const res = await authedApi("/api/friends");
+        const data = await res.json().catch(() => ({}));
+        if (!off) setFriends(res.ok ? data.friends || [] : []);
+      } catch (_) { if (!off) setFriends([]); }
+    })();
+    return () => { off = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const chosen = new Set(ids);
+  const toggle = (id) => onIdsChange(chosen.has(id) ? ids.filter((x) => x !== id) : [...ids, id]);
+  const needle = q.trim().toLowerCase();
+  const shown = (friends || []).filter((f) => !needle || f.name.toLowerCase().includes(needle) || f.username.includes(needle));
+  const Option = ({ value, title, sub }) => (
+    <Pressable style={[styles.audienceOption, mode === value && styles.audienceOptionActive]} onPress={() => onModeChange(value)}>
+      <Ionicons name={mode === value ? "radio-button-on" : "radio-button-off"} size={22} color={mode === value ? C.accent : C.textMuted} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.accountName}>{title}</Text>
+        <Text style={styles.roomInfo}>{sub}</Text>
+      </View>
+    </Pressable>
+  );
+  return (
+    <View>
+      <Text style={styles.sectionLabel}>Who can watch this {noun}</Text>
+      <Option value="all" title="All friends" sub={`Everyone you're connected with can see this ${noun}`} />
+      <Option value="some" title="Only selected people" sub={ids.length ? `${ids.length} selected` : `Choose who can see this ${noun}`} />
+      {mode === "some" && (
+        <View style={{ marginTop: 6 }}>
+          {friends === null ? (
+            <ActivityIndicator style={{ marginTop: 16 }} />
+          ) : friends.length === 0 ? (
+            <Text style={[styles.muted, { textAlign: "center", marginTop: 14 }]}>You have no friends yet. Add friends from the Discover tab first.</Text>
+          ) : (
+            <>
+              <TextInput style={[styles.input, { marginTop: 8 }]} placeholder="Search friends" placeholderTextColor={C.textFaint} value={q} onChangeText={setQ} autoCapitalize="none" />
+              <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 6 }}>
+                <Pressable onPress={() => onIdsChange(friends.map((f) => f.id))}><Text style={styles.link}>Select all</Text></Pressable>
+                <Pressable onPress={() => onIdsChange([])}><Text style={styles.link}>Clear</Text></Pressable>
+              </View>
+              {shown.map((f) => (
+                <Pressable key={f.id} style={styles.accountRow} onPress={() => toggle(f.id)}>
+                  <UserAvatar name={f.name} avatarUrl={f.avatarUrl} size={38} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.accountName} numberOfLines={1}>{f.name}</Text>
+                    <Text style={styles.roomInfo} numberOfLines={1}>@{f.username}</Text>
+                  </View>
+                  <Ionicons name={chosen.has(f.id) ? "checkbox" : "square-outline"} size={24} color={chosen.has(f.id) ? C.accent : C.textMuted} />
+                </Pressable>
+              ))}
+              {shown.length === 0 && <Text style={[styles.muted, { textAlign: "center", marginTop: 10 }]}>No match.</Text>}
+            </>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
 // Full-screen "new post" / "new story" flow:
 //   1. choose Photo or Video   2. edit it   3. write a caption and share.
 function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, onDone }) {
@@ -2575,9 +2765,12 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
   // Videos use their own length (max 60s), measured when the video is picked.
   const [duration, setDuration] = useState(isStory ? 5 : 15);
   const [videoSec, setVideoSec] = useState(null);
+  // Who can watch: everyone you're friends with, or only the people picked here.
+  const [audienceMode, setAudienceMode] = useState("all"); // "all" | "some"
+  const [audienceIds, setAudienceIds] = useState([]);
 
   useEffect(() => {
-    if (visible) { setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); setDuration(isStory ? 5 : 15); setVideoSec(null); }
+    if (visible) { setAudienceMode("all"); setAudienceIds([]); setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); setDuration(isStory ? 5 : 15); setVideoSec(null); }
   }, [visible]);
 
   async function pick(kind) {
@@ -2610,6 +2803,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
 
   async function share() {
     if (!edited || sharing) return;
+    if (audienceMode === "some" && audienceIds.length === 0) return Alert.alert("Choose people", "Pick at least one person, or switch back to All friends.");
     setSharing(true);
     try {
       const uploaded = await uploadAsset(token, { uri: edited.uri, fileName: edited.fileName, mimeType: edited.mimeType });
@@ -2618,7 +2812,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
       const playSec = asset?.isVideo ? (videoSec || MAX_VIDEO_SEC) : duration;
       const seg = music ? musicSegment(music, playSec) : null;
       const musicOut = seg ? { ...music, startSec: seg.start, endSec: seg.end } : null;
-      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: isStory ? "" : caption.trim(), media, duration: playSec, music: musicOut, overlays: overlays.filter((o) => o.text.trim()) }) });
+      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: isStory ? "" : caption.trim(), media, duration: playSec, music: musicOut, overlays: overlays.filter((o) => o.text.trim()), audience: audienceMode === "some" ? audienceIds : null }) });
       if (res.status === 401) return;
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return Alert.alert("Couldn't share", data.error || "Something went wrong.");
@@ -2699,11 +2893,27 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
             setDuration={setDuration}
             authedApi={authedApi}
             title={isStory ? "Add to story" : "Text & music"}
-            nextLabel={isStory ? "Share" : "Next"}
+            nextLabel="Next"
             busy={sharing}
             onBack={() => setStep("edit")}
-            onNext={() => (isStory ? share() : setStep("caption"))}
+            onNext={() => (isStory ? setStep("audience") : setStep("caption"))}
           />
+        )}
+
+        {step === "audience" && edited && isStory && (
+          <View style={{ flex: 1 }}>
+            <View style={[styles.header, styles.profileHeaderRow]}>
+              <Pressable onPress={() => setStep("decorate")} hitSlop={10} disabled={sharing}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
+              <Text style={styles.titleSmall}>Who can watch?</Text>
+              <Pressable onPress={share} disabled={sharing} hitSlop={10}>
+                {sharing ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>Share</Text>}
+              </Pressable>
+            </View>
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16 }}>
+              <AudiencePicker authedApi={authedApi} mode={audienceMode} onModeChange={setAudienceMode} ids={audienceIds} onIdsChange={setAudienceIds} noun="story" />
+              {sharing && <Text style={[styles.roomInfo, { textAlign: "center", marginTop: 20 }]}>Uploading... videos can take a little while.</Text>}
+            </ScrollView>
+          </View>
         )}
 
         {step === "caption" && edited && !isStory && (
@@ -2732,6 +2942,9 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
                   maxLength={2000}
                   autoFocus={Platform.OS === "web"}
                 />
+              </View>
+              <View style={{ marginTop: 20 }}>
+                <AudiencePicker authedApi={authedApi} mode={audienceMode} onModeChange={setAudienceMode} ids={audienceIds} onIdsChange={setAudienceIds} noun="post" />
               </View>
               {sharing && <Text style={[styles.roomInfo, { textAlign: "center", marginTop: 20 }]}>Uploading... videos can take a little while.</Text>}
             </ScrollView>
@@ -3531,7 +3744,7 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
             {(!!story.text || isMine) && (
               <View pointerEvents="none" style={styles.storyBottom}>
                 {!!story.text && <Text style={styles.storyCaption}>{story.text}</Text>}
-                {isMine && <Text style={styles.storyViews}>👁 {story.viewCount || 0} {story.viewCount === 1 ? "view" : "views"}</Text>}
+                {isMine && <Text style={styles.storyViews}>👁 {story.viewCount || 0} {story.viewCount === 1 ? "view" : "views"}{story.audienceCount != null ? `  ·  🔒 ${story.audienceCount} ${story.audienceCount === 1 ? "person" : "people"}` : ""}</Text>}
               </View>
             )}
           </View>
@@ -3555,7 +3768,7 @@ function PostVideo({ uri }) {
 // Theme + account settings, opened from the gear icon on Profile. A modal
 // (not a separate tab) since it's a handful of one-off preferences, not
 // something someone browses regularly.
-function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, authedApi }) {
+function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, authedApi, accounts = [], currentId, currentUsername, onSwitch, onAddAccount }) {
   const options = [
     { key: "system", label: "System", icon: "phone-portrait-outline" },
     { key: "light", label: "Light", icon: "sunny-outline" },
@@ -3572,6 +3785,7 @@ function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, a
             </Pressable>
           </View>
 
+          <ScrollView showsVerticalScrollIndicator={false}>
           <Text style={styles.sectionLabel}>Appearance</Text>
           <View style={styles.themeOptionRow}>
             {options.map((opt) => {
@@ -3596,10 +3810,30 @@ function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, a
             </>
           )}
 
-          <Text style={[styles.sectionLabel, { marginTop: 22 }]}>Account</Text>
-          <Pressable style={styles.logoutRow} onPress={onLogout}>
-            <Text style={styles.logoutText}>Log out</Text>
+          <Text style={[styles.sectionLabel, { marginTop: 22 }]}>Accounts</Text>
+          {accounts.map((a) => {
+            const active = a.user.id === currentId;
+            return (
+              <Pressable key={a.user.id} style={[styles.accountRow, active && styles.accountRowActive]} onPress={() => { if (!active && onSwitch) onSwitch(a); }}>
+                <UserAvatar name={a.user.name} avatarUrl={a.user.avatarUrl} size={38} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.accountName} numberOfLines={1}>{a.user.name}</Text>
+                  <Text style={styles.roomInfo} numberOfLines={1}>@{a.user.username}</Text>
+                </View>
+                {active ? <Ionicons name="checkmark-circle" size={22} color={C.accent} /> : <Text style={styles.headerAction}>Switch</Text>}
+              </Pressable>
+            );
+          })}
+          <Pressable style={styles.accountRow} onPress={onAddAccount}>
+            <View style={[styles.avatarSm, { alignItems: "center", justifyContent: "center", backgroundColor: C.surfaceRaised }]}>
+              <Ionicons name="add" size={22} color={C.accent} />
+            </View>
+            <Text style={[styles.accountName, { flex: 1 }]}>Add account</Text>
           </Pressable>
+          <Pressable style={styles.logoutRow} onPress={onLogout}>
+            <Text style={styles.logoutText}>{currentUsername ? `Log out of @${currentUsername}` : "Log out"}</Text>
+          </Pressable>
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -3785,7 +4019,7 @@ function AvatarCropModal({ asset, onCancel, onDone }) {
   );
 }
 
-function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onChangeTheme }) {
+function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAccount, onAddAccount, onUpdateMe, themeMode, onChangeTheme }) {
   const [posts, setPosts] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -3937,6 +4171,11 @@ function ProfileTab({ me, token, authedApi, onLogout, onUpdateMe, themeMode, onC
         themeMode={themeMode}
         onChangeTheme={onChangeTheme}
         onLogout={() => { setSettingsOpen(false); onLogout(); }}
+        accounts={accounts}
+        currentId={me?.id}
+        currentUsername={me?.username}
+        onSwitch={(a) => { setSettingsOpen(false); onSwitchAccount && onSwitchAccount(a); }}
+        onAddAccount={() => { setSettingsOpen(false); onAddAccount && onAddAccount(); }}
         authedApi={authedApi}
       />
       <EditBioModal
@@ -4440,6 +4679,11 @@ function buildStyles(C) {
   igCaption: { color: C.text, fontSize: 14, lineHeight: 20 },
   igMuted: { color: C.textMuted, fontSize: 14 },
   igTime: { color: C.textFaint, fontSize: 10, letterSpacing: 0.4, marginTop: 2 },
+  audienceOption: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: C.surface, borderRadius: 14, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: C.border },
+  audienceOptionActive: { borderColor: C.accent, backgroundColor: C.accentSoft },
+  accountRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: C.surface, borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12, marginBottom: 8, borderWidth: 1, borderColor: C.border },
+  accountRowActive: { borderColor: C.accent },
+  accountName: { color: C.text, fontSize: 15, fontWeight: "700" },
   pickTile: { backgroundColor: C.surface, borderRadius: 20, padding: 24, alignItems: "center", gap: 6, borderWidth: 1, borderColor: C.border },
   pickTileTitle: { color: C.text, fontSize: 18, fontWeight: "800" },
   captionThumb: { width: 84, height: 84, borderRadius: 10, backgroundColor: C.surfaceRaised },
