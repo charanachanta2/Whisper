@@ -276,6 +276,7 @@ function AppRoot() {
   const [replyingTo, setReplyingTo] = useState(null); // message being replied to
   const [actionMsg, setActionMsg] = useState(null); // message whose react/reply/delete sheet is open
   const [deleteTarget, setDeleteTarget] = useState(null); // message awaiting delete confirmation
+  const [chatMenuOpen, setChatMenuOpen] = useState(false); // "Delete chat" sheet in a direct chat
   const [messages, setMessages] = useState([]);
   const [socket, setSocket] = useState(null);
   const [socketReady, setSocketReady] = useState(false);
@@ -814,6 +815,22 @@ function AppRoot() {
     }
   }
 
+  // Deletes a direct chat for me only (the other person keeps theirs). Searching their name in Chats starts a fresh one.
+  async function deleteChat(room) {
+    if (!room) return;
+    try {
+      const res = await authedApi(`/api/rooms/${room.id}`, { method: "DELETE" });
+      if (res.status === 401) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        return Alert.alert("Couldn't delete chat", data.error || "Something went wrong.");
+      }
+      closeRoom();
+    } catch (_) {
+      Alert.alert("Network error", "Check your connection and try again.");
+    }
+  }
+
   async function sendMessage(type = "text", extra = {}) {
     if (!activeRoom) return;
     if (type === "text" && !message.trim()) return;
@@ -1113,6 +1130,10 @@ function AppRoot() {
   }
 
   if (screen === "chat" && activeRoom) {
+    // Profile photos: members come with the room (fresh avatars), falling back to the other person's info from the chat list.
+    const memberById = {};
+    for (const mem of roomMembers) memberById[mem.id] = mem;
+    const otherUser = activeRoom.isDirect ? (roomMembers.find((x) => x.id !== me?.id) || activeRoom.otherUser || null) : null;
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style={C.mode === "light" ? "dark" : "light"} />
@@ -1120,18 +1141,27 @@ function AppRoot() {
           <Pressable onPress={closeRoom} hitSlop={10}>
             <Text style={styles.back}>‹</Text>
           </Pressable>
-          <View style={[styles.avatarSm, { backgroundColor: colorFor(activeRoom.name || "C") }]}>
-            <Text style={styles.avatarText}>{(activeRoom.name || "C")[0].toUpperCase()}</Text>
-          </View>
+          {activeRoom.isDirect ? (
+            <UserAvatar name={activeRoom.name} avatarUrl={otherUser?.avatarUrl} thumbUrl={otherUser?.avatarThumbUrl} size={40} />
+          ) : (
+            <View style={[styles.avatarSm, { backgroundColor: colorFor(activeRoom.name || "C") }]}>
+              <Text style={styles.avatarText}>{(activeRoom.name || "C")[0].toUpperCase()}</Text>
+            </View>
+          )}
           <View style={{ flex: 1 }}>
-            <Text style={styles.titleSmall}>{activeRoom.name || "Chat"}</Text>
-            <Text style={styles.roomInfo}>
+            <Text style={styles.titleSmall} numberOfLines={1}>{activeRoom.name || "Chat"}</Text>
+            <Text style={styles.roomInfo} numberOfLines={1}>
               {activeRoom.isDirect
-                ? "Direct message"
+                ? (otherUser?.username ? `@${otherUser.username}` : "Direct message")
                 : `${roomMembers.length} member${roomMembers.length === 1 ? "" : "s"}`}
             </Text>
           </View>
           {!activeRoom.isDirect && <ChatHeaderActions room={activeRoom} authedApi={authedApi} onMembersAdded={setRoomMembers} onShare={shareRoomInvite} />}
+          {activeRoom.isDirect && (
+            <Pressable style={styles.iconButtonSm} onPress={() => setChatMenuOpen(true)} hitSlop={8}>
+              <Ionicons name="ellipsis-vertical" size={20} color={C.text} />
+            </Pressable>
+          )}
           <Text style={[styles.live, socketReady && styles.liveOn]}>{socketReady ? "● LIVE" : "○ …"}</Text>
         </View>
 
@@ -1154,10 +1184,14 @@ function AppRoot() {
             >
               {item.userId !== me?.id && (
                 <View style={styles.postHeader}>
-                  <View style={[styles.avatarXs, { backgroundColor: colorFor(item.userName) }]}>
-                    <Text style={styles.avatarTextXs}>{item.userName[0].toUpperCase()}</Text>
-                  </View>
-                  <Text style={styles.messageUser}>{item.userName}</Text>
+                  <UserAvatar
+                    name={memberById[item.userId]?.name || item.userName}
+                    avatarUrl={memberById[item.userId]?.avatarUrl}
+                    thumbUrl={memberById[item.userId]?.avatarThumbUrl}
+                    size={26}
+                    style={{ marginRight: 8 }}
+                  />
+                  <Text style={styles.messageUser}>{memberById[item.userId]?.name || item.userName}</Text>
                 </View>
               )}
               {item.replyTo ? (
@@ -1274,6 +1308,12 @@ function AppRoot() {
           actions={[{ label: "Delete for everyone", icon: "trash-outline", destructive: true, onPress: () => deleteTarget && deleteMsg(deleteTarget) }]}
           onClose={() => setDeleteTarget(null)}
         />
+        <ActionSheet
+          visible={chatMenuOpen}
+          title={`Delete this chat with ${activeRoom.name || "this person"}? It's removed from your side only, and ${activeRoom.name || "they"} will still have their copy. You can message them again any time by searching their name in Chats.`}
+          actions={[{ label: "Delete chat", icon: "trash-outline", destructive: true, onPress: () => deleteChat(activeRoom) }]}
+          onClose={() => setChatMenuOpen(false)}
+        />
       </SafeAreaView>
     );
   }
@@ -1304,6 +1344,7 @@ function AppRoot() {
           <ChatsTab
             authedApi={authedApi}
             onOpen={openRoom}
+            onMessage={messageFriend}
             onOpenVoice={openVoiceRoom}
             refreshKey={roomsRefreshKey}
             unread={notifUnread}
@@ -1696,6 +1737,139 @@ function AddPeopleModal({ visible, onClose, room, authedApi, onMembersAdded }) {
   );
 }
 
+// Shared header for the post / story flow: round back button, centred title, a clear pill action,
+// and a thin progress bar so people can see how many steps are left.
+function FlowHeader({ title, onBack, backIcon = "arrow-back", actionLabel, onAction, busy, step, total }) {
+  return (
+    <View>
+      <View style={styles.flowHeader}>
+        <Pressable style={styles.flowBack} onPress={onBack} disabled={busy} hitSlop={8}>
+          <Ionicons name={backIcon} size={22} color={C.text} />
+        </Pressable>
+        <Text style={styles.flowTitle} numberOfLines={1}>{title}</Text>
+        {actionLabel ? (
+          <Pressable style={[styles.flowAction, busy && { opacity: 0.7 }]} onPress={onAction} disabled={busy} hitSlop={6}>
+            {busy ? <ActivityIndicator size="small" color={C.white} /> : <Text style={styles.flowActionText}>{actionLabel}</Text>}
+          </Pressable>
+        ) : (
+          <View style={{ width: 38 }} />
+        )}
+      </View>
+      {total ? (
+        <View style={styles.flowSteps}>
+          {Array.from({ length: total }).map((_, i) => <View key={i} style={[styles.flowStep, i < step && styles.flowStepOn]} />)}
+        </View>
+      ) : <View style={{ height: 1, backgroundColor: C.border }} />}
+    </View>
+  );
+}
+
+// "+" on Home: choose what to create.
+function CreateMenu({ visible, onClose, onPick }) {
+  const rows = [
+    { kind: "post", icon: "images-outline", title: "Post", sub: "Share a photo or video with your friends" },
+    { kind: "story", icon: "add-circle-outline", title: "Story", sub: "Disappears after 24 hours" },
+  ];
+  return (
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={[styles.modalSheet, { minHeight: 0, paddingBottom: 24 }]} onPress={() => {}}>
+          <Text style={[styles.titleSmall, { fontSize: 19, marginBottom: 14 }]}>Create</Text>
+          {rows.map((r) => (
+            <Pressable key={r.kind} style={({ pressed }) => [styles.createMenuRow, pressed && { opacity: 0.8 }]} onPress={() => onPick(r.kind)}>
+              <View style={styles.createMenuIcon}><Ionicons name={r.icon} size={24} color={C.accent} /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.roomTitle}>{r.title}</Text>
+                <Text style={styles.roomInfo}>{r.sub}</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={C.textMuted} />
+            </Pressable>
+          ))}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// Who has seen one of your stories (only ever shown to the story's author).
+function StoryViewersSheet({ visible, viewers, onClose }) {
+  const n = viewers ? viewers.length : 0;
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={[styles.modalSheet, { paddingBottom: 24 }]} onPress={() => {}}>
+          <View style={styles.modalHeaderRow}>
+            <View>
+              <Text style={[styles.titleSmall, { fontSize: 19 }]}>Viewers</Text>
+              <Text style={styles.roomInfo}>{viewers === null ? "Loading…" : `${n} ${n === 1 ? "person has" : "people have"} seen this story`}</Text>
+            </View>
+            <Pressable onPress={onClose} hitSlop={10}><Ionicons name="close" size={24} color={C.text} /></Pressable>
+          </View>
+          {viewers === null ? (
+            <ActivityIndicator style={{ marginTop: 24 }} />
+          ) : (
+            <FlatList
+              data={viewers}
+              keyExtractor={(v) => v.id}
+              renderItem={({ item }) => (
+                <View style={styles.viewerRow}>
+                  <UserAvatar name={item.name} avatarUrl={item.avatarUrl} thumbUrl={item.avatarThumbUrl} size={44} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.accountName} numberOfLines={1}>{item.name}</Text>
+                    <Text style={styles.roomInfo} numberOfLines={1}>@{item.username}</Text>
+                  </View>
+                  {item.viewedAt ? <Text style={styles.viewerTime}>{timeAgo(item.viewedAt)}</Text> : null}
+                </View>
+              )}
+              ListEmptyComponent={<Text style={styles.empty}>No views yet.{"\n"}Friends who watch it will show up here.</Text>}
+            />
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// Followers / following lists opened from the profile counts.
+function ConnectionsModal({ visible, initialTab, data, loading, onClose }) {
+  const [tab, setTab] = useState("followers");
+  useEffect(() => { if (visible) setTab(initialTab || "followers"); }, [visible, initialTab]);
+  const list = (tab === "followers" ? data.followers : data.following) || [];
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+        <FlowHeader title="Connections" onBack={onClose} backIcon="close" />
+        <View style={styles.connTabs}>
+          {[["followers", "Followers", data.followersCount], ["following", "Following", data.followingCount]].map(([key, label, count]) => (
+            <Pressable key={key} style={[styles.segment, tab === key && styles.segmentActive]} onPress={() => setTab(key)}>
+              <Text style={[styles.segmentText, tab === key && styles.segmentTextActive]}>{label} · {count || 0}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <FlatList
+          data={list}
+          keyExtractor={(u) => u.id}
+          contentContainerStyle={{ padding: 16 }}
+          renderItem={({ item }) => (
+            <View style={styles.accountRow}>
+              <UserAvatar name={item.name} avatarUrl={item.avatarUrl} thumbUrl={item.avatarThumbUrl} size={44} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.accountName} numberOfLines={1}>{item.name}</Text>
+                <Text style={styles.roomInfo} numberOfLines={1}>@{item.username}</Text>
+              </View>
+            </View>
+          )}
+          ListEmptyComponent={loading ? <ActivityIndicator style={{ marginTop: 30 }} /> : (
+            <Text style={styles.empty}>
+              {tab === "followers" ? "No followers yet.\nPeople whose requests you accept appear here." : "You're not following anyone yet.\nPeople who accept your request appear here."}
+            </Text>
+          )}
+        />
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function ChatHeaderActions({ room, authedApi, onMembersAdded, onShare }) {
   const [modalVisible, setModalVisible] = useState(false);
   return (
@@ -1717,7 +1891,7 @@ function ChatHeaderActions({ room, authedApi, onMembersAdded, onShare }) {
   );
 }
 
-function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOpenNotifications }) {
+function ChatsTab({ authedApi, onOpen, onMessage, onOpenVoice, refreshKey, unread = 0, onOpenNotifications }) {
   const chrome = useContext(ScrollChromeContext);
   const [subTab, setSubTab] = useState("direct"); // direct | rooms | voice
   const [rooms, setRooms] = useState([]);
@@ -1725,6 +1899,40 @@ function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOp
   const [roomName, setRoomName] = useState("");
   const [creating, setCreating] = useState(false);
   const [addPeopleFor, setAddPeopleFor] = useState(null);
+  // Search a friend by name to (re)start a direct chat -- also how you message someone again after deleting the chat.
+  const [search, setSearch] = useState("");
+  const [friends, setFriends] = useState(null); // null = not loaded yet
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const needle = search.trim().toLowerCase();
+  const searching = subTab === "direct" && needle.length > 0;
+  useEffect(() => {
+    if (!searching || friends !== null) return;
+    let off = false;
+    (async () => {
+      try {
+        const res = await authedApi("/api/friends");
+        const data = await res.json().catch(() => ({}));
+        if (!off) setFriends(res.ok ? data.friends || [] : []);
+      } catch (_) { if (!off) setFriends([]); }
+    })();
+    return () => { off = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searching]);
+  const found = searching ? (friends || []).filter((f) => f.name.toLowerCase().includes(needle) || f.username.includes(needle)) : [];
+
+  async function deleteChat(room) {
+    try {
+      const res = await authedApi(`/api/rooms/${room.id}`, { method: "DELETE" });
+      if (res.status === 401) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        return Alert.alert("Couldn't delete chat", data.error || "Something went wrong.");
+      }
+      setRooms((old) => old.filter((r) => r.id !== room.id));
+    } catch (_) {
+      Alert.alert("Network error", "Check your connection and try again.");
+    }
+  }
 
   async function refresh() {
     setLoadingRooms(true);
@@ -1799,6 +2007,27 @@ function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOp
         </Pressable>
       </View>
 
+      {subTab === "direct" && (
+        <View style={[styles.chatSearch, { marginTop: 12 }]}>
+          <Ionicons name="search" size={18} color={C.textMuted} />
+          <TextInput
+            style={styles.chatSearchInput}
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search a friend by name"
+            placeholderTextColor={C.textFaint}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+          />
+          {search.length > 0 && (
+            <Pressable onPress={() => setSearch("")} hitSlop={10}>
+              <Ionicons name="close-circle" size={18} color={C.textMuted} />
+            </Pressable>
+          )}
+        </View>
+      )}
+
       {(subTab === "rooms" || subTab === "voice") && (
         <View style={styles.createBox}>
           <TextInput
@@ -1818,15 +2047,30 @@ function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOp
         <ActivityIndicator style={{ marginTop: 30 }} />
       ) : (
         <FlatList
-          data={list}
+          data={searching ? found : list}
           keyExtractor={(r) => r.id}
           onScroll={chrome.onScroll}
           scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ padding: 16, paddingBottom: 16 + TAB_SPACE }}
-          renderItem={({ item }) => (
+          renderItem={({ item }) => searching ? (
+            <Pressable
+              style={({ pressed }) => [styles.roomCard, pressed && { opacity: 0.8 }]}
+              onPress={() => { setSearch(""); onMessage && onMessage(item); }}
+            >
+              <UserAvatar name={item.name} avatarUrl={item.avatarUrl} thumbUrl={item.avatarThumbUrl} size={48} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.roomTitle} numberOfLines={1}>{item.name}</Text>
+                <Text style={styles.roomInfo} numberOfLines={1}>@{item.username}</Text>
+              </View>
+              <View style={styles.smallButton}><Text style={styles.buttonText}>Message</Text></View>
+            </Pressable>
+          ) : (
             <Pressable
               style={({ pressed }) => [styles.roomCard, pressed && { opacity: 0.8 }]}
               onPress={() => openItem(item)}
+              delayLongPress={350}
+              onLongPress={item.isDirect ? () => setDeleteTarget(item) : undefined}
             >
               {item.isDirect && item.otherUser?.avatarUrl ? (
                 <UserAvatar name={item.name} avatarUrl={item.otherUser.avatarUrl} thumbUrl={item.otherUser.avatarThumbUrl} size={48} />
@@ -1851,20 +2095,34 @@ function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOp
                     : `${item.memberCount} member(s)`}
                 </Text>
               </View>
-              <Text style={styles.back}>›</Text>
+              {item.isDirect ? (
+                <Pressable style={styles.rowMenuBtn} onPress={() => setDeleteTarget(item)} hitSlop={8}>
+                  <Ionicons name="ellipsis-horizontal" size={20} color={C.textMuted} />
+                </Pressable>
+              ) : (
+                <Text style={styles.back}>›</Text>
+              )}
             </Pressable>
           )}
-          ListEmptyComponent={
+          ListEmptyComponent={searching ? (
+            friends === null ? <ActivityIndicator style={{ marginTop: 30 }} /> : <Text style={styles.empty}>No friends match "{search.trim()}".</Text>
+          ) : (
             <Text style={styles.empty}>
               {subTab === "direct"
-                ? "No direct messages yet. Add a friend in Discover, then tap Message."
+                ? "No direct messages yet. Search a friend's name above to start chatting, or add friends in Discover."
                 : subTab === "voice"
                 ? "No voice rooms yet. Create one above, then add people to it."
                 : "No rooms yet. Create one above, then add people to it."}
             </Text>
-          }
+          )}
         />
       )}
+      <ActionSheet
+        visible={!!deleteTarget}
+        title={deleteTarget ? `Delete this chat with ${deleteTarget.name}? It's removed from your side only, and they keep their copy. Search their name above to message them again.` : ""}
+        actions={[{ label: "Delete chat", icon: "trash-outline", destructive: true, onPress: () => deleteTarget && deleteChat(deleteTarget) }]}
+        onClose={() => setDeleteTarget(null)}
+      />
 
       {addPeopleFor && (
         <AddPeopleModal
@@ -2700,6 +2958,7 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications, refres
   const [refreshing, setRefreshing] = useState(false);
   const [editingPost, setEditingPost] = useState(null);
   const [creating, setCreating] = useState(null); // null | "post" | "story"
+  const [menuOpen, setMenuOpen] = useState(false); // the + menu (Post / Story)
   const [viewer, setViewer] = useState(null); // { userId }
   // Music on a post plays while that post is on screen; it stops while the
   // story viewer, composer or editor is open on top of the feed.
@@ -2743,7 +3002,7 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications, refres
   return (
     <View style={{ flex: 1 }}>
       <View style={[styles.header, styles.profileHeaderRow]}>
-        <Pressable style={styles.gearButton} onPress={() => setCreating("post")} hitSlop={8}>
+        <Pressable style={styles.gearButton} onPress={() => setMenuOpen(true)} hitSlop={8}>
           <Ionicons name="add" size={24} color={C.text} />
         </Pressable>
         <Text style={styles.brandTitle}>Hush</Text>
@@ -2785,14 +3044,23 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications, refres
         onClose={() => setEditingPost(null)}
         onSaved={(updated) => setPosts((old) => old.map((p) => (p.id === updated.id ? updated : p)))}
       />
+      <CreateMenu
+        visible={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        onPick={(kind) => {
+          setMenuOpen(false);
+          // Give the menu a moment to close before the full-screen flow opens (iOS can't present two modals at once).
+          setTimeout(() => setCreating(kind), Platform.OS === "web" ? 0 : 300);
+        }}
+      />
       <CreateMediaModal
         visible={!!creating}
         mode={creating || "post"}
         token={token}
         authedApi={authedApi}
         onClose={() => setCreating(null)}
-        onDone={(item) => {
-          if (creating === "story") setStories((old) => [...old, item]);
+        onDone={(item, kind) => {
+          if (kind === "story") setStories((old) => [...old, item]);
           else setPosts((old) => [item, ...old]);
         }}
       />
@@ -2921,13 +3189,7 @@ function MediaEditor({ asset, aspects, title = "Edit", nextLabel = "Next", onBac
 
   return (
     <View style={{ flex: 1 }}>
-      <View style={[styles.header, styles.profileHeaderRow]}>
-        <Pressable onPress={onBack} hitSlop={10}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
-        <Text style={styles.titleSmall}>{title}</Text>
-        <Pressable onPress={confirm} disabled={busy} hitSlop={10}>
-          {busy ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>{nextLabel}</Text>}
-        </Pressable>
-      </View>
+      <FlowHeader title={title} onBack={onBack} actionLabel={nextLabel} onAction={confirm} busy={busy} step={2} total={4} />
       <ScrollView contentContainerStyle={{ alignItems: "center", paddingBottom: 30 }}>
         <View style={[styles.cropViewport, { width: fw, height: fh, marginTop: 8 }]} {...pan.panHandlers}>
           <Image
@@ -2938,33 +3200,36 @@ function MediaEditor({ asset, aspects, title = "Edit", nextLabel = "Next", onBac
           <View pointerEvents="none" style={styles.cropRing} />
         </View>
         <Text style={[styles.roomInfo, { marginTop: 8 }]}>Drag to reposition</Text>
-        <View style={styles.editChipsRow}>
-          {aspects.map((a) => (
-            <Pressable key={a.key} onPress={() => setAspectKey(a.key)} style={[styles.editChip, aspectKey === a.key && styles.editChipActive]}>
-              <Text style={[styles.editChipText, aspectKey === a.key && { color: C.white }]}>{a.label}</Text>
+        <View style={[styles.toolCard, { width: EDIT_W }]}>
+          <View style={styles.editChipsRow}>
+            {aspects.map((a) => (
+              <Pressable key={a.key} onPress={() => setAspectKey(a.key)} style={[styles.editChip, aspectKey === a.key && styles.editChipActive]}>
+                <Text style={[styles.editChipText, aspectKey === a.key && { color: C.white }]}>{a.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <View style={styles.zoomRow}>
+            <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom - 0.25)}><Ionicons name="remove" size={22} color={C.text} /></Pressable>
+            <Pressable onPress={onBarPress} hitSlop={{ top: 14, bottom: 14 }} style={[styles.zoomTrack, { width: BAR_W }]}>
+              <View pointerEvents="none" style={[styles.zoomFill, { width: ((zoom - 1) / (MAX_ZOOM - 1)) * BAR_W }]} />
             </Pressable>
-          ))}
-        </View>
-        <View style={styles.zoomRow}>
-          <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom - 0.25)}><Ionicons name="remove" size={22} color={C.text} /></Pressable>
-          <Pressable onPress={onBarPress} hitSlop={{ top: 14, bottom: 14 }} style={[styles.zoomTrack, { width: BAR_W }]}>
-            <View pointerEvents="none" style={[styles.zoomFill, { width: ((zoom - 1) / (MAX_ZOOM - 1)) * BAR_W }]} />
-          </Pressable>
-          <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom + 0.25)}><Ionicons name="add" size={22} color={C.text} /></Pressable>
-        </View>
-        <View style={styles.zoomRow}>
-          <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.rotate(-90))} disabled={busy}>
-            <Ionicons name="refresh-outline" size={20} color={C.text} style={{ transform: [{ scaleX: -1 }] }} />
-            <Text style={styles.editToolText}>Rotate left</Text>
-          </Pressable>
-          <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.rotate(90))} disabled={busy}>
-            <Ionicons name="refresh-outline" size={20} color={C.text} />
-            <Text style={styles.editToolText}>Rotate right</Text>
-          </Pressable>
-          <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.flip("horizontal"))} disabled={busy}>
-            <Ionicons name="swap-horizontal-outline" size={20} color={C.text} />
-            <Text style={styles.editToolText}>Flip</Text>
-          </Pressable>
+            <Pressable style={styles.zoomBtn} onPress={() => setZoomTo(zoom + 0.25)}><Ionicons name="add" size={22} color={C.text} /></Pressable>
+          </View>
+          <View style={styles.toolDivider} />
+          <View style={styles.zoomRow}>
+            <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.rotate(-90))} disabled={busy}>
+              <Ionicons name="refresh-outline" size={20} color={C.text} style={{ transform: [{ scaleX: -1 }] }} />
+              <Text style={styles.editToolText}>Rotate left</Text>
+            </Pressable>
+            <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.rotate(90))} disabled={busy}>
+              <Ionicons name="refresh-outline" size={20} color={C.text} />
+              <Text style={styles.editToolText}>Rotate right</Text>
+            </Pressable>
+            <Pressable style={styles.editToolBtn} onPress={() => transform((c) => c.flip("horizontal"))} disabled={busy}>
+              <Ionicons name="swap-horizontal-outline" size={20} color={C.text} />
+              <Text style={styles.editToolText}>Flip</Text>
+            </Pressable>
+          </View>
         </View>
       </ScrollView>
     </View>
@@ -3131,7 +3396,8 @@ function MentionPicker({ authedApi, ids, onIdsChange, noun = "post" }) {
 // Full-screen "new post" / "new story" flow:
 //   1. choose Photo or Video   2. edit it   3. write a caption and share.
 function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, onDone }) {
-  const isStory = mode === "story";
+  const [kind, setKind] = useState(mode); // "post" | "story" -- can be switched on the first screen
+  const isStory = kind === "story";
   const [step, setStep] = useState("pick"); // pick | edit | caption
   const [asset, setAsset] = useState(null); // what the picker returned
   const [edited, setEdited] = useState(null); // ready-to-upload result
@@ -3149,8 +3415,9 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
   const [mentionIds, setMentionIds] = useState([]); // friends tagged in this post/story
 
   useEffect(() => {
-    if (visible) { setMentionIds([]); setAudienceMode("all"); setAudienceIds([]); setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); setDuration(isStory ? 5 : 15); setVideoSec(null); }
+    if (visible) { setKind(mode); setMentionIds([]); setAudienceMode("all"); setAudienceIds([]); setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); setDuration(mode === "story" ? 5 : 15); setVideoSec(null); }
   }, [visible]);
+  function switchKind(k) { setKind(k); setDuration(k === "story" ? 5 : 15); }
 
   async function pick(kind) {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -3195,7 +3462,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
       if (res.status === 401) return;
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return Alert.alert("Couldn't share", data.error || "Something went wrong.");
-      onDone(isStory ? data.story : data.post);
+      onDone(isStory ? data.story : data.post, isStory ? "story" : "post");
       onClose();
     } catch (e) {
       Alert.alert("Couldn't share", e.message || "Check your connection and try again.");
@@ -3211,22 +3478,29 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
       <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
         {step === "pick" && (
           <View style={{ flex: 1 }}>
-            <View style={[styles.header, styles.profileHeaderRow]}>
-              <Pressable onPress={onClose} hitSlop={10}><Ionicons name="close" size={26} color={C.text} /></Pressable>
-              <Text style={styles.titleSmall}>{isStory ? "New story" : "New post"}</Text>
-              <View style={{ width: 26 }} />
+            <FlowHeader title="Create" onBack={onClose} backIcon="close" />
+            <View style={styles.kindSwitch}>
+              {[["post", "Post"], ["story", "Story"]].map(([k, label]) => (
+                <Pressable key={k} style={[styles.kindOption, kind === k && styles.kindOptionOn]} onPress={() => switchKind(k)}>
+                  <Text style={[styles.kindOptionText, kind === k && { color: C.white }]}>{label}</Text>
+                </Pressable>
+              ))}
             </View>
-            <View style={{ flex: 1, justifyContent: "center", padding: 24, gap: 16 }}>
-              <Pressable style={styles.pickTile} onPress={() => pick("photo")}>
-                <Ionicons name="image-outline" size={34} color={C.accent} />
-                <Text style={styles.pickTileTitle}>Photo</Text>
-                <Text style={styles.roomInfo}>{isStory ? "Crop and resize. Stays up for up to 15 seconds" : "Crop and resize. Plays for 15 to 30 seconds"}</Text>
-              </Pressable>
-              <Pressable style={styles.pickTile} onPress={() => pick("video")}>
-                <Ionicons name="videocam-outline" size={34} color={C.accent} />
-                <Text style={styles.pickTileTitle}>Video</Text>
-                <Text style={styles.roomInfo}>{Platform.OS === "web" ? "Up to 60 seconds" : "Up to 60 seconds. Trim it to the part you want"}</Text>
-              </Pressable>
+            <View style={styles.pickBody}>
+              <Text style={styles.pickHeading}>{isStory ? "Add to your story" : "Share a post"}</Text>
+              <Text style={styles.pickSub}>{isStory ? "Your friends can watch it for 24 hours." : "Your friends will see it on their feed and on your profile."}</Text>
+              <View style={styles.pickRow}>
+                <Pressable style={({ pressed }) => [styles.pickCard, pressed && { opacity: 0.85 }]} onPress={() => pick("photo")}>
+                  <View style={styles.pickIcon}><Ionicons name="image-outline" size={30} color={C.accent} /></View>
+                  <Text style={styles.pickCardTitle}>Photo</Text>
+                  <Text style={styles.pickCardHint}>{isStory ? "Shows for up to 15 seconds" : "Plays for 15 to 30 seconds"}</Text>
+                </Pressable>
+                <Pressable style={({ pressed }) => [styles.pickCard, pressed && { opacity: 0.85 }]} onPress={() => pick("video")}>
+                  <View style={styles.pickIcon}><Ionicons name="videocam-outline" size={30} color={C.accent} /></View>
+                  <Text style={styles.pickCardTitle}>Video</Text>
+                  <Text style={styles.pickCardHint}>{Platform.OS === "web" ? "Up to 60 seconds" : "Up to 60 seconds, trim it when you pick"}</Text>
+                </Pressable>
+              </View>
             </View>
           </View>
         )}
@@ -3243,11 +3517,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
 
         {step === "edit" && asset && asset.isVideo && (
           <View style={{ flex: 1 }}>
-            <View style={[styles.header, styles.profileHeaderRow]}>
-              <Pressable onPress={() => setStep("pick")} hitSlop={10}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
-              <Text style={styles.titleSmall}>Preview video</Text>
-              <Pressable onPress={() => setStep("decorate")} hitSlop={10}><Text style={styles.headerAction}>Next</Text></Pressable>
-            </View>
+            <FlowHeader title="Preview video" onBack={() => setStep("pick")} actionLabel="Next" onAction={() => setStep("decorate")} step={2} total={4} />
             <View style={{ alignItems: "center", marginTop: 8 }}>
               <MediaVideo uri={asset.uri} style={{ width: EDIT_W, aspectRatio: videoRatio, backgroundColor: "#000", borderRadius: 4 }} />
               <Text style={[styles.roomInfo, { marginTop: 12, textAlign: "center", paddingHorizontal: 24 }]}>
@@ -3275,60 +3545,61 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
             nextLabel="Next"
             busy={sharing}
             onBack={() => setStep("edit")}
-            onNext={() => (isStory ? setStep("audience") : setStep("caption"))}
+            onNext={() => setStep("share")}
           />
         )}
 
-        {step === "audience" && edited && isStory && (
-          <View style={{ flex: 1 }}>
-            <View style={[styles.header, styles.profileHeaderRow]}>
-              <Pressable onPress={() => setStep("decorate")} hitSlop={10} disabled={sharing}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
-              <Text style={styles.titleSmall}>Who can watch?</Text>
-              <Pressable onPress={share} disabled={sharing} hitSlop={10}>
-                {sharing ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>Share</Text>}
-              </Pressable>
-            </View>
-            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16 }}>
-              <MentionPicker authedApi={authedApi} ids={mentionIds} onIdsChange={setMentionIds} noun="story" />
-              <AudiencePicker authedApi={authedApi} mode={audienceMode} onModeChange={setAudienceMode} ids={audienceIds} onIdsChange={setAudienceIds} noun="story" />
-              {sharing && <Text style={[styles.roomInfo, { textAlign: "center", marginTop: 20 }]}>Uploading... videos can take a little while.</Text>}
-            </ScrollView>
-          </View>
-        )}
-
-        {step === "caption" && edited && !isStory && (
+        {step === "share" && edited && (
           <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-            <View style={[styles.header, styles.profileHeaderRow]}>
-              <Pressable onPress={() => setStep("decorate")} hitSlop={10} disabled={sharing}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
-              <Text style={styles.titleSmall}>New post</Text>
-              <Pressable onPress={share} disabled={sharing} hitSlop={10}>
-                {sharing ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>Share</Text>}
-              </Pressable>
-            </View>
-            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16 }}>
-              <View style={{ flexDirection: "row", gap: 12, alignItems: "flex-start" }}>
-                {edited.type === "video" ? (
-                  <View style={[styles.captionThumb, { alignItems: "center", justifyContent: "center" }]}><Ionicons name="play-circle-outline" size={30} color={C.textMuted} /></View>
+            <FlowHeader title={isStory ? "Share to story" : "New post"} onBack={() => setStep("decorate")} busy={sharing} step={4} total={4} />
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
+              <View style={styles.shareCard}>
+                <View style={styles.shareThumb}>
+                  {edited.type === "video" ? (
+                    <Ionicons name="play-circle-outline" size={34} color={C.textMuted} />
+                  ) : (
+                    <Image source={{ uri: edited.uri }} style={{ width: 92, height: 92 }} />
+                  )}
+                </View>
+                {isStory ? (
+                  <View style={{ flex: 1, justifyContent: "center", minHeight: 92 }}>
+                    <Text style={styles.shareStoryTitle}>Your story</Text>
+                    <Text style={styles.roomInfo}>
+                      {[
+                        "Disappears after 24 hours",
+                        asset?.isVideo ? `Video ${videoSec ? fmtClock(videoSec) : ""}`.trim() : `Shows for ${duration}s`,
+                        music ? `Song: ${music.title}` : null,
+                        overlays.filter((o) => o.text.trim()).length ? `${overlays.filter((o) => o.text.trim()).length} text` : null,
+                      ].filter(Boolean).join("  ·  ")}
+                    </Text>
+                  </View>
                 ) : (
-                  <Image source={{ uri: edited.uri }} style={styles.captionThumb} />
+                  <TextInput
+                    style={styles.shareCaptionInput}
+                    value={caption}
+                    onChangeText={setCaption}
+                    placeholder="Write a caption..."
+                    placeholderTextColor={C.textFaint}
+                    multiline
+                    maxLength={2000}
+                    autoFocus={Platform.OS === "web"}
+                  />
                 )}
-                <TextInput
-                  style={[styles.input, { flex: 1, minHeight: 90, textAlignVertical: "top", marginBottom: 0 }]}
-                  value={caption}
-                  onChangeText={setCaption}
-                  placeholder="Write a caption..."
-                  placeholderTextColor={C.textFaint}
-                  multiline
-                  maxLength={2000}
-                  autoFocus={Platform.OS === "web"}
-                />
               </View>
-              <View style={{ marginTop: 20 }}>
-                <MentionPicker authedApi={authedApi} ids={mentionIds} onIdsChange={setMentionIds} noun="post" />
-                <AudiencePicker authedApi={authedApi} mode={audienceMode} onModeChange={setAudienceMode} ids={audienceIds} onIdsChange={setAudienceIds} noun="post" />
-              </View>
+              <MentionPicker authedApi={authedApi} ids={mentionIds} onIdsChange={setMentionIds} noun={isStory ? "story" : "post"} />
+              <AudiencePicker authedApi={authedApi} mode={audienceMode} onModeChange={setAudienceMode} ids={audienceIds} onIdsChange={setAudienceIds} noun={isStory ? "story" : "post"} />
               {sharing && <Text style={[styles.roomInfo, { textAlign: "center", marginTop: 20 }]}>Uploading... videos can take a little while.</Text>}
             </ScrollView>
+            <View style={styles.shareFooter}>
+              <Pressable style={({ pressed }) => [styles.shareBtn, (sharing || pressed) && { opacity: 0.8 }]} onPress={share} disabled={sharing}>
+                {sharing ? <ActivityIndicator color={C.white} /> : (
+                  <>
+                    <Ionicons name="paper-plane-outline" size={19} color={C.white} />
+                    <Text style={styles.shareBtnText}>{isStory ? "Share to story" : "Share post"}</Text>
+                  </>
+                )}
+              </Pressable>
+            </View>
           </KeyboardAvoidingView>
         )}
       </SafeAreaView>
@@ -3867,13 +4138,7 @@ function DecorateStep({ edited, overlays, setOverlays, music, setMusic, isVideo,
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-      <View style={[styles.header, styles.profileHeaderRow]}>
-        <Pressable onPress={onBack} hitSlop={10}><Ionicons name="arrow-back" size={24} color={C.text} /></Pressable>
-        <Text style={styles.titleSmall}>{title}</Text>
-        <Pressable onPress={() => { done(); onNext(); }} disabled={busy} hitSlop={10}>
-          {busy ? <ActivityIndicator size="small" color={C.accent} /> : <Text style={styles.headerAction}>{nextLabel}</Text>}
-        </Pressable>
-      </View>
+      <FlowHeader title={title} onBack={onBack} actionLabel={nextLabel} onAction={() => { done(); onNext(); }} busy={busy} step={3} total={4} />
       <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ alignItems: "center", paddingBottom: 30 }}>
         <View style={{ width: fw, height: fh, marginTop: 8, backgroundColor: "#000", overflow: "hidden" }}>
           {edited.type === "video" ? (
@@ -3890,11 +4155,11 @@ function DecorateStep({ edited, overlays, setOverlays, music, setMusic, isVideo,
 
         <View style={styles.decorateBar}>
           <Pressable style={styles.decorateBtn} onPress={addText}>
-            <Text style={styles.decorateAa}>Aa</Text>
+            <View style={styles.decorateIcon}><Text style={styles.decorateAa}>Aa</Text></View>
             <Text style={styles.editToolText}>Text</Text>
           </Pressable>
           <Pressable style={styles.decorateBtn} onPress={() => setMusicOpen(true)}>
-            <Ionicons name="musical-notes-outline" size={22} color={C.text} />
+            <View style={styles.decorateIcon}><Ionicons name="musical-notes-outline" size={22} color={C.text} /></View>
             <Text style={styles.editToolText}>Music</Text>
           </Pressable>
         </View>
@@ -4021,6 +4286,8 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
   const [vidDur, setVidDur] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [viewersOpen, setViewersOpen] = useState(false); // "who viewed" sheet (my own stories)
+  const [viewerLists, setViewerLists] = useState({}); // storyId -> people who viewed it
   const [box, setBox] = useState({ w: 1, h: 1 });
   const progress = useRef(new Animated.Value(0)).current;
   const group = groups[gi];
@@ -4039,6 +4306,16 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
     else setTick((t) => t + 1);
   }
 
+  // Fresh list of who has seen one of my stories (the feed's copy can be older than the latest views).
+  async function loadViewers(storyId) {
+    try {
+      const res = await authedApi(`/api/stories/${storyId}/viewers`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setViewerLists((old) => ({ ...old, [storyId]: data.viewers || [] }));
+    } catch (_) {}
+  }
+
   useEffect(() => {
     if (!story) return;
     setVidDur(null);
@@ -4046,10 +4323,11 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
       onViewed(story);
       authedApi(`/api/stories/${story.id}/view`, { method: "POST" }).catch(() => {});
     }
+    if (isMine) loadViewers(story.id);
   }, [story?.id]);
 
   useEffect(() => {
-    if (!story || confirmDel) return;
+    if (!story || confirmDel || viewersOpen) return;
     progress.setValue(0);
     // Photo stories stay up for the length their author chose (3-15s, 5s if
     // unset); video stories play for the video's own length, capped at 60s.
@@ -4057,7 +4335,7 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
     const anim = Animated.timing(progress, { toValue: 1, duration: ms, easing: Easing.linear, useNativeDriver: false });
     anim.start(({ finished }) => { if (finished) next(); });
     return () => anim.stop();
-  }, [story?.id, vidDur, tick, confirmDel]);
+  }, [story?.id, vidDur, tick, confirmDel, viewersOpen]);
 
   async function remove() {
     try {
@@ -4151,13 +4429,30 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
               </View>
             )}
             {(!!story.text || isMine) && (
-              <View pointerEvents="none" style={styles.storyBottom}>
-                {!!story.text && <Text style={styles.storyCaption}>{story.text}</Text>}
-                {isMine && <Text style={styles.storyViews}>👁 {story.viewCount || 0} {story.viewCount === 1 ? "view" : "views"}{story.audienceCount != null ? `  ·  🔒 ${story.audienceCount} ${story.audienceCount === 1 ? "person" : "people"}` : ""}</Text>}
+              <View pointerEvents="box-none" style={styles.storyBottom}>
+                {!!story.text && <View pointerEvents="none"><Text style={styles.storyCaption}>{story.text}</Text></View>}
+                {isMine && (() => {
+                  const seen = viewerLists[story.id] ? viewerLists[story.id].length : (story.viewCount || 0);
+                  return (
+                    <Pressable style={styles.storyViewsBtn} onPress={() => { setViewersOpen(true); loadViewers(story.id); }} hitSlop={6}>
+                      <Ionicons name="eye-outline" size={20} color="#fff" />
+                      <Text style={styles.storyViewsText}>{seen} {seen === 1 ? "view" : "views"}</Text>
+                      {story.audienceCount != null ? <Text style={styles.storyViewsSub}>·  🔒 {story.audienceCount} {story.audienceCount === 1 ? "person" : "people"}</Text> : null}
+                      <View style={{ flex: 1 }} />
+                      <Text style={styles.storyViewsSub}>See who</Text>
+                      <Ionicons name="chevron-up" size={16} color="#fff" />
+                    </Pressable>
+                  );
+                })()}
               </View>
             )}
           </View>
         </View>
+        <StoryViewersSheet
+          visible={viewersOpen}
+          viewers={viewerLists[story.id] || (story.viewerUsers || null)}
+          onClose={() => setViewersOpen(false)}
+        />
         <ActionSheet
           visible={confirmDel}
           title="Delete this story?"
@@ -4496,6 +4791,22 @@ function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAcc
   const [cropAsset, setCropAsset] = useState(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
   useEffect(() => { setAvatarFailed(false); }, [me?.avatarUrl]);
+  // Followers = people whose request I accepted; following = people who accepted mine.
+  const [conn, setConn] = useState({ followers: [], following: [], followersCount: 0, followingCount: 0 });
+  const [connLoading, setConnLoading] = useState(true);
+  const [connOpen, setConnOpen] = useState(null); // null | "followers" | "following"
+  const loadConnections = async () => {
+    try {
+      const res = await authedApi("/api/me/connections");
+      if (!res.ok) return;
+      const data = await res.json();
+      setConn({ followers: data.followers || [], following: data.following || [], followersCount: data.followersCount || 0, followingCount: data.followingCount || 0 });
+    } catch (_) {
+    } finally {
+      setConnLoading(false);
+    }
+  };
+  useEffect(() => { loadConnections(); }, [me?.id]);
 
   const load = async () => {
     setLoadingPosts(true);
@@ -4614,10 +4925,18 @@ function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAcc
             </View>
 
             <View style={styles.statsRow}>
-              <View style={styles.statBlock}>
+              <View style={styles.statPress}>
                 <Text style={styles.statNumber}>{posts.length}</Text>
                 <Text style={styles.statLabel}>Posts</Text>
               </View>
+              <Pressable style={styles.statPress} onPress={() => { setConnOpen("followers"); loadConnections(); }} hitSlop={6}>
+                <Text style={styles.statNumber}>{conn.followersCount}</Text>
+                <Text style={styles.statLabel}>Followers</Text>
+              </Pressable>
+              <Pressable style={styles.statPress} onPress={() => { setConnOpen("following"); loadConnections(); }} hitSlop={6}>
+                <Text style={styles.statNumber}>{conn.followingCount}</Text>
+                <Text style={styles.statLabel}>Following</Text>
+              </Pressable>
             </View>
 
             <View style={styles.divider} />
@@ -4655,6 +4974,7 @@ function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAcc
         onSaved={onUpdateMe}
       />
       <AvatarCropModal asset={cropAsset} onCancel={() => setCropAsset(null)} onDone={uploadCropped} />
+      <ConnectionsModal visible={!!connOpen} initialTab={connOpen} data={conn} loading={connLoading} onClose={() => setConnOpen(null)} />
       <EditPostModal
         visible={!!editingPost}
         post={editingPost}
@@ -5023,7 +5343,7 @@ function buildStyles(C) {
   setRowValue: { color: C.textMuted, fontSize: 16, marginRight: 6, maxWidth: 140 },
   mentionHeader: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
   igMention: { color: C.accent, fontSize: 14, marginTop: 4 },
-  storyTagWrap: { position: "absolute", left: 16, right: 16, bottom: 70, gap: 10, alignItems: "flex-start" },
+  storyTagWrap: { position: "absolute", left: 16, right: 16, bottom: 104, gap: 10, alignItems: "flex-start" },
   storyTagText: { color: "#fff", fontWeight: "700", fontSize: 14, backgroundColor: "rgba(0,0,0,0.45)", paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12, overflow: "hidden" },
   storyAddBtn: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "rgba(255,255,255,0.22)", borderWidth: 1, borderColor: "rgba(255,255,255,0.5)", borderRadius: 22, paddingVertical: 10, paddingHorizontal: 16 },
   storyAddText: { color: "#fff", fontWeight: "800", fontSize: 15 },
@@ -5135,7 +5455,7 @@ function buildStyles(C) {
   bioPlaceholder: { color: C.textFaint, fontSize: 14, fontStyle: "italic" },
   bioEditRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 },
   bioEditLabel: { color: C.accent, fontSize: 13, fontWeight: "700" },
-  statsRow: { flexDirection: "row", justifyContent: "center", gap: 36, marginTop: 20 },
+  statsRow: { flexDirection: "row", justifyContent: "center", gap: 16, marginTop: 20 },
   statBlock: { alignItems: "center" },
   statNumber: { color: C.text, fontSize: 18, fontWeight: "800" },
   statLabel: { color: C.textMuted, fontSize: 12, marginTop: 2 },
@@ -5166,7 +5486,8 @@ function buildStyles(C) {
   songArt: { width: 52, height: 52, borderRadius: 8, backgroundColor: C.surfaceRaised },
   songPlay: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accent, alignItems: "center", justifyContent: "center" },
   decorateBar: { flexDirection: "row", gap: 28, marginTop: 16 },
-  decorateBtn: { alignItems: "center", gap: 4, minWidth: 56 },
+  decorateBtn: { alignItems: "center", gap: 6, minWidth: 64 },
+  decorateIcon: { width: 52, height: 52, borderRadius: 26, alignItems: "center", justifyContent: "center", backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
   decorateAa: { color: C.text, fontSize: 21, fontWeight: "900" },
   textPanel: { marginTop: 14, padding: 14, borderRadius: 16, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
   textPanelRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
@@ -5275,6 +5596,53 @@ function buildStyles(C) {
     alignItems: "center",
   },
   logoutText: { color: C.danger, fontWeight: "700", fontSize: 15 },
+
+  // -- Create flow (post / story) --
+  flowHeader: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: C.surface },
+  flowBack: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: C.surfaceRaised },
+  flowTitle: { flex: 1, textAlign: "center", color: C.text, fontSize: 17, fontWeight: "800" },
+  flowAction: { minWidth: 64, height: 38, borderRadius: 19, paddingHorizontal: 16, alignItems: "center", justifyContent: "center", backgroundColor: C.accent },
+  flowActionText: { color: C.white, fontWeight: "800", fontSize: 14 },
+  flowSteps: { flexDirection: "row", gap: 6, paddingHorizontal: 14, paddingBottom: 12, backgroundColor: C.surface, borderBottomWidth: 1, borderBottomColor: C.border },
+  flowStep: { flex: 1, height: 4, borderRadius: 2, backgroundColor: C.surfaceRaised },
+  flowStepOn: { backgroundColor: C.accent },
+  kindSwitch: { flexDirection: "row", alignSelf: "center", marginTop: 18, padding: 4, borderRadius: 14, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  kindOption: { paddingVertical: 9, paddingHorizontal: 28, borderRadius: 10 },
+  kindOptionOn: { backgroundColor: C.accent },
+  kindOptionText: { color: C.textMuted, fontWeight: "800", fontSize: 14 },
+  pickBody: { flex: 1, justifyContent: "center", paddingHorizontal: 20, paddingBottom: 40 },
+  pickHeading: { color: C.text, fontSize: 24, fontWeight: "800", textAlign: "center" },
+  pickSub: { color: C.textMuted, fontSize: 14, textAlign: "center", marginTop: 6, marginBottom: 26 },
+  pickRow: { flexDirection: "row", gap: 14, justifyContent: "center" },
+  pickCard: { flex: 1, maxWidth: 200, alignItems: "center", paddingVertical: 26, paddingHorizontal: 12, borderRadius: 22, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, gap: 6 },
+  pickIcon: { width: 60, height: 60, borderRadius: 30, alignItems: "center", justifyContent: "center", backgroundColor: C.accentSoft, marginBottom: 6 },
+  pickCardTitle: { color: C.text, fontSize: 17, fontWeight: "800" },
+  pickCardHint: { color: C.textMuted, fontSize: 12, textAlign: "center", lineHeight: 17 },
+  toolCard: { alignSelf: "center", marginTop: 14, paddingBottom: 14, paddingHorizontal: 14, borderRadius: 18, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  toolDivider: { height: 1, backgroundColor: C.border, marginTop: 16 },
+  shareCard: { flexDirection: "row", gap: 12, alignItems: "flex-start", padding: 12, borderRadius: 18, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, marginBottom: 20 },
+  shareThumb: { width: 92, height: 92, borderRadius: 12, backgroundColor: C.surfaceRaised, alignItems: "center", justifyContent: "center", overflow: "hidden" },
+  shareCaptionInput: { flex: 1, minHeight: 92, color: C.text, fontSize: 15, textAlignVertical: "top", paddingTop: 4, paddingHorizontal: 4 },
+  shareStoryTitle: { color: C.text, fontSize: 16, fontWeight: "800" },
+  shareFooter: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 12, backgroundColor: C.surface, borderTopWidth: 1, borderTopColor: C.border },
+  shareBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, height: 50, borderRadius: 25, backgroundColor: C.accent },
+  shareBtnText: { color: C.white, fontSize: 16, fontWeight: "800" },
+  createMenuRow: { flexDirection: "row", alignItems: "center", gap: 14, padding: 14, borderRadius: 16, backgroundColor: C.surfaceRaised, marginBottom: 10 },
+  createMenuIcon: { width: 46, height: 46, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: C.accentSoft },
+
+  // -- Story viewers --
+  storyViewsBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.18)", alignSelf: "stretch" },
+  storyViewsText: { color: "#fff", fontWeight: "800", fontSize: 14 },
+  storyViewsSub: { color: "rgba(255,255,255,0.8)", fontSize: 12 },
+  viewerRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 10 },
+  viewerTime: { color: C.textFaint, fontSize: 12 },
+
+  // -- Chats: search + profile counts --
+  chatSearch: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 16, marginBottom: 6, paddingHorizontal: 12, borderRadius: 14, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  chatSearchInput: { flex: 1, color: C.text, paddingVertical: 11, fontSize: 15 },
+  rowMenuBtn: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center" },
+  statPress: { alignItems: "center", minWidth: 64 },
+  connTabs: { flexDirection: "row", marginHorizontal: 16, marginTop: 12, marginBottom: 8, padding: 4, borderRadius: 14, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
   });
 }
 let styles = buildStyles(C);
