@@ -20,6 +20,8 @@ import {
   ScrollView,
   PanResponder,
   Easing,
+  BackHandler,
+  Vibration,
 } from "react-native";
 // react-native core's SafeAreaView is iOS-only (it's a no-op on Android),
 // which is why the header/status bar area could overlap system content on
@@ -274,8 +276,12 @@ function AppRoot() {
   const [activeVoiceRoom, setActiveVoiceRoom] = useState(null); // { id, name }
   const [message, setMessage] = useState("");
   const [replyingTo, setReplyingTo] = useState(null); // message being replied to
-  const [actionMsg, setActionMsg] = useState(null); // message whose react/reply/delete sheet is open
+  const [menuTarget, setMenuTarget] = useState(null); // { item, rect } -- message whose long-press menu is open
   const [deleteTarget, setDeleteTarget] = useState(null); // message awaiting delete confirmation
+  const [editingMsg, setEditingMsg] = useState(null); // own text message being edited (within 5 minutes of sending)
+  const [selectMode, setSelectMode] = useState(false); // multi-select (for deleting several messages)
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [deleteManyOpen, setDeleteManyOpen] = useState(false);
   const [chatMenuOpen, setChatMenuOpen] = useState(false); // "Delete chat" sheet in a direct chat
   const [messages, setMessages] = useState([]);
   const [socket, setSocket] = useState(null);
@@ -561,6 +567,9 @@ function AppRoot() {
     setMessages([]);
     setRoomMembers([]);
     setReplyingTo(null);
+    setEditingMsg(null);
+    setSelectMode(false);
+    setSelectedIds([]);
     socket.emit("join_room", { roomId: activeRoom.id });
 
     const onRoomState = (state) => {
@@ -585,8 +594,22 @@ function AppRoot() {
           .map((m) => (repliesUpdated.includes(m.id) && m.replyTo ? { ...m, replyTo: { ...m.replyTo, type: "deleted", text: "" } } : m)),
       );
       setReplyingTo((r) => (r && r.id === messageId ? null : r));
-      setActionMsg((a) => (a && a.id === messageId ? null : a));
+      setMenuTarget((a) => (a && a.item.id === messageId ? null : a));
+      setEditingMsg((e) => {
+        if (e && e.id === messageId) { setMessage(""); return null; }
+        return e;
+      });
+      setSelectedIds((ids) => ids.filter((x) => x !== messageId));
     };
+    // Someone edited a message: update its text and any quotes of it.
+    const onEdited = ({ messageId, text, editedAt, repliesUpdated = [] }) =>
+      setMessages((old) =>
+        old.map((m) => {
+          if (m.id === messageId) return { ...m, text, editedAt };
+          if (repliesUpdated.includes(m.id) && m.replyTo) return { ...m, replyTo: { ...m.replyTo, text: String(text || "").slice(0, 140) } };
+          return m;
+        }),
+      );
     const onReaction = ({ messageId, reactions }) =>
       setMessages((old) => old.map((m) => (m.id === messageId ? { ...m, reactions: reactions || [] } : m)));
 
@@ -596,8 +619,10 @@ function AppRoot() {
     socket.on("error_message", onErr);
     socket.on("message_deleted", onDeleted);
     socket.on("message_reaction", onReaction);
+    socket.on("message_edited", onEdited);
 
     return () => {
+      socket.off("message_edited", onEdited);
       socket.emit("leave_room", { roomId: activeRoom.id });
       socket.off("message_deleted", onDeleted);
       socket.off("message_reaction", onReaction);
@@ -783,6 +808,10 @@ function AppRoot() {
   }
 
   function closeRoom() {
+    setEditingMsg(null);
+    setSelectMode(false);
+    setSelectedIds([]);
+    setMenuTarget(null);
     setScreen("main");
     setActiveRoom(null);
     setMessages([]);
@@ -799,6 +828,52 @@ function AppRoot() {
     setActiveVoiceRoom(null);
     setRoomsRefreshKey((k) => k + 1);
   }
+
+  // ---- Back navigation (Android back button / back gesture, browser back, and the in-app edge swipe) ----
+  // Returns "sub" when it only closed something inside the chat (selection, edit, reply), "close" when it
+  // left a screen, or false when there is nothing to go back to (the system then handles it, e.g. exits).
+  function backStep() {
+    if (screen === "chat" && activeRoom) {
+      if (menuTarget) { setMenuTarget(null); return "sub"; }
+      if (selectMode) { exitSelect(); return "sub"; }
+      if (editingMsg) { cancelEdit(); return "sub"; }
+      if (replyingTo) { setReplyingTo(null); return "sub"; }
+      closeRoom();
+      return "close";
+    }
+    if (screen === "voice") { closeVoiceRoom(); return "close"; }
+    if (screen === "main" && mainTab !== "home") { setMainTab("home"); return "close"; }
+    return false;
+  }
+  const backStepRef = useRef(backStep);
+  backStepRef.current = backStep;
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => !!backStepRef.current());
+    return () => sub.remove();
+  }, []);
+  // On the web/PWA, opening a chat adds a history entry so the browser's back button or edge swipe
+  // returns to the chat list instead of leaving the app.
+  const historyRef = useRef({ pushed: false, ignore: false });
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    const h = historyRef.current;
+    const inSub = screen === "chat" || screen === "voice";
+    if (inSub && !h.pushed) { window.history.pushState({ whisper: 1 }, ""); h.pushed = true; }
+    else if (!inSub && h.pushed) { h.pushed = false; h.ignore = true; window.history.back(); }
+  }, [screen]);
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    const onPop = () => {
+      const h = historyRef.current;
+      if (h.ignore) { h.ignore = false; return; }
+      if (!h.pushed) return;
+      h.pushed = false;
+      const result = backStepRef.current();
+      if (result === "sub") { window.history.pushState({ whisper: 1 }, ""); h.pushed = true; }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // Opens (or creates) the 1:1 chat with a friend. This is the piece that
   // was previously missing end-to-end: search/discover could see a friend
@@ -834,6 +909,7 @@ function AppRoot() {
   async function sendMessage(type = "text", extra = {}) {
     if (!activeRoom) return;
     if (type === "text" && !message.trim()) return;
+    if (type === "text" && editingMsg) return saveEdit();
     // socket can exist but not be connected yet (still handshaking, mid
     // reconnect, etc). Sending on a dead connection used to look like it
     // worked -- the input cleared -- while the message silently vanished,
@@ -876,6 +952,45 @@ function AppRoot() {
     if (!socket || !socketReady || !activeRoom) return Alert.alert("Not connected", "Check your connection and try again.");
     socket.timeout(8000).emit("react_message", { roomId: activeRoom.id, messageId: msg.id, emoji }, (err, ack) => {
       if (err || !ack?.ok) Alert.alert("Couldn't react", err ? "The server didn't respond in time." : ack?.error || "Please try again.");
+    });
+  }
+  function startEdit(msg) {
+    if (!canEditMsg(msg, me?.id)) return Alert.alert("Can't edit", "Messages can only be edited within 5 minutes of sending. You can still delete it.");
+    setReplyingTo(null);
+    setEditingMsg(msg);
+    setMessage(msg.text || "");
+  }
+  function cancelEdit() { setEditingMsg(null); setMessage(""); }
+  function saveEdit() {
+    const msg = editingMsg;
+    const text = message.trim();
+    if (!msg || !text) return;
+    if (text === (msg.text || "").trim()) return cancelEdit();
+    if (!socket || !socketReady || !activeRoom) return Alert.alert("Not connected", "Check your connection and try again.");
+    if (editMsLeft(msg) <= 0) { cancelEdit(); return Alert.alert("Too late to edit", "Messages can only be edited within 5 minutes of sending."); }
+    socket.timeout(8000).emit("edit_message", { roomId: activeRoom.id, messageId: msg.id, text }, (err, ack) => {
+      if (err) return Alert.alert("Couldn't edit", "The server didn't respond in time. Please try again.");
+      if (!ack?.ok) {
+        if (ack?.expired) cancelEdit();
+        return Alert.alert("Couldn't edit", ack?.error || "Please try again.");
+      }
+    });
+    setEditingMsg(null);
+    setMessage("");
+  }
+  function startSelect(msg) { setSelectMode(true); setSelectedIds([msg.id]); }
+  function exitSelect() { setSelectMode(false); setSelectedIds([]); }
+  function toggleSelect(msg) {
+    if (msg.userId !== me?.id) return; // only your own messages can be deleted
+    setSelectedIds((ids) => (ids.includes(msg.id) ? ids.filter((x) => x !== msg.id) : [...ids, msg.id]));
+  }
+  function deleteSelected() {
+    if (!socket || !socketReady || !activeRoom) return Alert.alert("Not connected", "Check your connection and try again.");
+    const ids = selectedIds;
+    if (!ids.length) return;
+    socket.timeout(10000).emit("delete_messages", { roomId: activeRoom.id, messageIds: ids }, (err, ack) => {
+      if (err || !ack?.ok) return Alert.alert("Couldn't delete", err ? "The server didn't respond in time." : ack?.error || "Please try again.");
+      exitSelect();
     });
   }
   function deleteMsg(msg) {
@@ -1134,9 +1249,27 @@ function AppRoot() {
     const memberById = {};
     for (const mem of roomMembers) memberById[mem.id] = mem;
     const otherUser = activeRoom.isDirect ? (roomMembers.find((x) => x.id !== me?.id) || activeRoom.otherUser || null) : null;
+    const myMsgCount = selectedIds.length;
     return (
+      <EdgeSwipeBack onBack={closeRoom} enabled={!selectMode}>
       <SafeAreaView style={styles.container}>
         <StatusBar style={C.mode === "light" ? "dark" : "light"} />
+        {selectMode ? (
+          <View style={styles.dmHeader}>
+            <Pressable onPress={exitSelect} hitSlop={10} style={{ paddingRight: 2 }} accessibilityLabel="Cancel selection">
+              <Ionicons name="close" size={28} color={C.text} />
+            </Pressable>
+            <Text style={[styles.dmHeaderName, { flex: 1 }]}>{myMsgCount} selected</Text>
+            <Pressable
+              onPress={() => myMsgCount > 0 && setDeleteManyOpen(true)}
+              hitSlop={10}
+              style={[styles.iconButtonSm, myMsgCount === 0 && { opacity: 0.4 }]}
+              accessibilityLabel="Delete selected messages"
+            >
+              <Ionicons name="trash-outline" size={24} color={C.danger || "#E5484D"} />
+            </Pressable>
+          </View>
+        ) : (
         <View style={styles.dmHeader}>
           <Pressable onPress={closeRoom} hitSlop={10} style={{ paddingRight: 2 }}>
             <Ionicons name="chevron-back" size={28} color={C.text} />
@@ -1165,6 +1298,7 @@ function AppRoot() {
             </Pressable>
           )}
         </View>
+        )}
 
         <FlatList
           ref={listRef}
@@ -1178,47 +1312,28 @@ function AppRoot() {
             listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true })
           }
           contentContainerStyle={{ paddingVertical: 12, paddingHorizontal: 10 }}
+          extraData={[selectMode, selectedIds]}
           renderItem={({ item, index }) => {
-            const mine = item.userId === me?.id;
             const prev = messages[index - 1];
             const next = messages[index + 1];
-            const joinsPrev = !!prev && prev.userId === item.userId && !dmGap(prev, item);
-            const joinsNext = !!next && next.userId === item.userId && !dmGap(item, next);
-            const showTime = dmGap(prev, item);
-            const isMedia = item.type === "media";
-            const who = memberById[item.userId];
-            const bubbleShape = mine
-              ? { borderTopRightRadius: joinsPrev ? 6 : 22, borderBottomRightRadius: joinsNext ? 6 : 22 }
-              : { borderTopLeftRadius: joinsPrev ? 6 : 22, borderBottomLeftRadius: joinsNext ? 6 : 22 };
             return (
-              <View>
-                {showTime && <Text style={styles.dmTimeSep}>{dmTimeLabel(item.createdAt)}</Text>}
-                <View style={[styles.dmRow, mine && styles.dmRowMine, { marginTop: joinsPrev ? 2 : 10 }]}>
-                  {!mine && (
-                    <View style={styles.dmAvatarCol}>
-                      {!joinsNext ? <UserAvatar name={who?.name || item.userName} avatarUrl={who?.avatarUrl} thumbUrl={who?.avatarThumbUrl} size={28} /> : null}
-                    </View>
-                  )}
-                  <View style={{ maxWidth: "76%", alignItems: mine ? "flex-end" : "flex-start" }}>
-                    {!mine && !activeRoom.isDirect && !joinsPrev ? <Text style={styles.dmSender}>{who?.name || item.userName}</Text> : null}
-                    <Pressable
-                      delayLongPress={300}
-                      onLongPress={() => setActionMsg(item)}
-                      style={[styles.dmBubble, mine ? styles.dmBubbleMine : styles.dmBubbleTheirs, isMedia && styles.dmBubbleMedia, bubbleShape]}
-                    >
-                      {item.replyTo ? (
-                        <ReplyQuote reply={item.replyTo} meId={me?.id} onMine={mine} onPress={() => scrollToMessage(item.replyTo.id)} />
-                      ) : null}
-                      <MessageBody item={item} isMe={mine} />
-                    </Pressable>
-                    {Array.isArray(item.reactions) && item.reactions.length > 0 && (
-                      <View style={[styles.dmReactions, mine ? { marginRight: 10 } : { marginLeft: 10 }]}>
-                        <ReactionChips reactions={item.reactions} meId={me?.id} onMine={false} onToggle={(emoji) => reactTo(item, emoji)} />
-                      </View>
-                    )}
-                  </View>
-                </View>
-              </View>
+              <ChatMessageRow
+                item={item}
+                mine={item.userId === me?.id}
+                meId={me?.id}
+                isDirectRoom={!!activeRoom.isDirect}
+                joinsPrev={!!prev && prev.userId === item.userId && !dmGap(prev, item)}
+                joinsNext={!!next && next.userId === item.userId && !dmGap(item, next)}
+                showTime={dmGap(prev, item)}
+                who={memberById[item.userId]}
+                selectMode={selectMode}
+                selected={selectedIds.includes(item.id)}
+                onToggleSelect={toggleSelect}
+                onReply={(m) => { setEditingMsg(null); setReplyingTo(m); }}
+                onOpenMenu={(m, rect) => setMenuTarget({ item: m, rect })}
+                onReactToggle={reactTo}
+                onQuotePress={() => item.replyTo && scrollToMessage(item.replyTo.id)}
+              />
             );
           }}
           ListEmptyComponent={
@@ -1231,7 +1346,18 @@ function AppRoot() {
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
-          {replyingTo ? (
+          {editingMsg ? (
+            <View style={styles.replyBar}>
+              <Ionicons name="create-outline" size={18} color={C.accent} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.replyBarName} numberOfLines={1}>Editing message</Text>
+                <Text style={styles.replyBarText} numberOfLines={1}>{editingMsg.text}</Text>
+              </View>
+              <Pressable onPress={cancelEdit} hitSlop={10}>
+                <Ionicons name="close" size={20} color={C.textMuted} />
+              </Pressable>
+            </View>
+          ) : replyingTo && !selectMode ? (
             <View style={styles.replyBar}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.replyBarName} numberOfLines={1}>
@@ -1244,6 +1370,7 @@ function AppRoot() {
               </Pressable>
             </View>
           ) : null}
+          {selectMode ? null : (
           <View style={styles.dmComposer}>
             <View style={styles.dmInputPill}>
               <Pressable style={styles.dmCamBtn} onPress={() => pickWith(pickPhoto)} disabled={uploading} hitSlop={6} accessibilityLabel="Send a photo or video">
@@ -1253,7 +1380,7 @@ function AppRoot() {
                 style={styles.dmInput}
                 value={message}
                 onChangeText={setMessage}
-                placeholder="Message…"
+                placeholder={editingMsg ? "Edit message…" : "Message…"}
                 placeholderTextColor={C.textFaint}
                 onSubmitEditing={() => sendMessage("text")}
                 onFocus={closeAttachMenu}
@@ -1261,7 +1388,7 @@ function AppRoot() {
               />
               {message.trim().length > 0 ? (
                 <Pressable onPress={() => sendMessage("text")} hitSlop={8}>
-                  <Text style={styles.dmSendText}>Send</Text>
+                  <Text style={styles.dmSendText}>{editingMsg ? "Save" : "Send"}</Text>
                 </Pressable>
               ) : (
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
@@ -1271,14 +1398,23 @@ function AppRoot() {
               )}
             </View>
           </View>
+          )}
         </KeyboardAvoidingView>
-        <MessageActions
-          message={actionMsg}
+        <MessageMenu
+          target={menuTarget}
           meId={me?.id}
-          onClose={() => setActionMsg(null)}
-          onReact={(emoji) => actionMsg && reactTo(actionMsg, emoji)}
-          onReply={() => actionMsg && setReplyingTo(actionMsg)}
-          onDelete={() => actionMsg && setDeleteTarget(actionMsg)}
+          onClose={() => setMenuTarget(null)}
+          onReact={(emoji) => menuTarget && reactTo(menuTarget.item, emoji)}
+          onReply={() => menuTarget && (setEditingMsg(null), setReplyingTo(menuTarget.item))}
+          onEdit={() => menuTarget && startEdit(menuTarget.item)}
+          onDelete={() => menuTarget && setDeleteTarget(menuTarget.item)}
+          onSelect={() => menuTarget && startSelect(menuTarget.item)}
+        />
+        <ActionSheet
+          visible={deleteManyOpen}
+          title={`Delete ${selectedIds.length} message${selectedIds.length === 1 ? "" : "s"} for everyone?`}
+          actions={[{ label: "Delete for everyone", icon: "trash-outline", destructive: true, onPress: deleteSelected }]}
+          onClose={() => setDeleteManyOpen(false)}
         />
         <ActionSheet
           visible={!!deleteTarget}
@@ -1293,18 +1429,21 @@ function AppRoot() {
           onClose={() => setChatMenuOpen(false)}
         />
       </SafeAreaView>
+      </EdgeSwipeBack>
     );
   }
 
   if (screen === "voice" && activeVoiceRoom) {
     return (
-      <VoiceRoomScreen
-        room={activeVoiceRoom}
-        socket={socket}
-        socketReady={socketReady}
-        me={me}
-        onClose={closeVoiceRoom}
-      />
+      <EdgeSwipeBack onBack={closeVoiceRoom}>
+        <VoiceRoomScreen
+          room={activeVoiceRoom}
+          socket={socket}
+          socketReady={socketReady}
+          me={me}
+          onClose={closeVoiceRoom}
+        />
+      </EdgeSwipeBack>
     );
   }
 
@@ -1368,8 +1507,6 @@ function AppRoot() {
 }
 
 // ---- Reply / react helpers ----
-const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
-
 // One-line description of a message (or of the snapshot stored inside a reply).
 function quoteText(m) {
   if (!m) return "";
@@ -1432,38 +1569,264 @@ function ReactionChips({ reactions, meId, onMine, onToggle }) {
   );
 }
 
-// Long-press (or "..." button) menu for a message: pick an emoji, reply, or delete your own.
-function MessageActions({ message, meId, onClose, onReact, onReply, onDelete }) {
-  if (!message) return null;
-  const mine = message.userId === meId;
-  const myReaction = (message.reactions || []).find((r) => r.userId === meId)?.emoji;
-  const danger = C.danger || "#E5484D";
+// ---- Back gesture ----
+// Swipe right from the left edge of the screen to go back (like iOS / Instagram). The screen follows the
+// finger, then slides away. Android's system back gesture/button is handled separately by BackHandler.
+function EdgeSwipeBack({ onBack, enabled = true, children }) {
+  const x = useRef(new Animated.Value(0)).current;
+  const live = useRef({ onBack, enabled });
+  live.current = { onBack, enabled };
+  const W = Dimensions.get("window").width;
+  const springBack = () => Animated.spring(x, { toValue: 0, useNativeDriver: true, bounciness: 0, speed: 20 }).start();
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (e, g) => {
+        if (!live.current.enabled) return false;
+        const startX = e.nativeEvent.pageX - g.dx;
+        return startX <= 32 && g.dx > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5;
+      },
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (_, g) => x.setValue(Math.max(0, g.dx)),
+      onPanResponderRelease: (_, g) => {
+        if (g.dx > W * 0.28 || g.vx > 0.7) {
+          Animated.timing(x, { toValue: W, duration: 160, useNativeDriver: true }).start(() => {
+            live.current.onBack();
+            x.setValue(0);
+          });
+        } else springBack();
+      },
+      onPanResponderTerminate: springBack,
+    }),
+  ).current;
+  const shadow = x.interpolate({ inputRange: [0, W], outputRange: [0, 0.35], extrapolate: "clamp" });
   return (
-    <Modal visible animationType="fade" transparent onRequestClose={onClose}>
-      <Pressable style={styles.modalBackdrop} onPress={onClose}>
-        <Pressable style={[styles.modalSheet, { paddingBottom: 24 }]} onPress={() => {}}>
-          <View style={styles.emojiRow}>
-            {REACTION_EMOJIS.map((e) => (
-              <Pressable key={e} onPress={() => { onClose(); onReact(e); }} style={[styles.emojiBtn, myReaction === e && styles.emojiBtnActive]}>
-                <Text style={styles.emojiText}>{e}</Text>
-              </Pressable>
-            ))}
+    <View style={{ flex: 1, backgroundColor: C.bg }}>
+      <Animated.View style={{ flex: 1, backgroundColor: C.bg, transform: [{ translateX: x }] }} {...pan.panHandlers}>
+        {children}
+      </Animated.View>
+      <Animated.View pointerEvents="none" style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: 6, backgroundColor: "#000", opacity: shadow }} />
+    </View>
+  );
+}
+
+// ---- Message helpers ----
+const EDIT_WINDOW_MS = 5 * 60 * 1000; // a message can be edited for 5 minutes after it's sent; delete stays available
+const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+const MORE_EMOJIS = [
+  "👍", "👎", "❤️", "🔥", "😂", "🤣", "😍", "🥰", "😘", "😊", "😁", "😎", "🤩", "🥳",
+  "😮", "😲", "😢", "😭", "😡", "🤔", "🙄", "😴", "🤯", "😱", "🙏", "👏", "🙌", "💪",
+  "👌", "✌️", "🤝", "💯", "🎉", "✨", "💔", "💙", "💜", "🖤", "👀", "🤞", "🫶", "☺️",
+];
+function editMsLeft(m) { return EDIT_WINDOW_MS - (Date.now() - new Date(m.createdAt).getTime()); }
+function canEditMsg(m, meId) { return !!m && m.userId === meId && m.type === "text" && editMsLeft(m) > 0; }
+function buzz(ms = 12) { try { if (Platform.OS !== "web") Vibration.vibrate(ms); } catch (_) {} }
+
+// One chat message: swipe LEFT to reply, long-press to open the animated menu (react / reply / edit / delete / select).
+function ChatMessageRow({ item, mine, isDirectRoom, joinsPrev, joinsNext, showTime, who, meId, selectMode, selected, onToggleSelect, onReply, onOpenMenu, onReactToggle, onQuotePress }) {
+  const tx = useRef(new Animated.Value(0)).current;
+  const pop = useRef(new Animated.Value(1)).current;
+  const bubbleRef = useRef(null);
+  const passed = useRef(false);
+  const live = useRef({});
+  live.current = { selectMode, onReply, item };
+  const swipe = useRef(
+    PanResponder.create({
+      // Only a clearly horizontal drag to the LEFT starts it, so vertical scrolling is untouched.
+      onMoveShouldSetPanResponder: (_, g) => !live.current.selectMode && g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.8,
+      onPanResponderGrant: () => { passed.current = false; },
+      onPanResponderMove: (_, g) => {
+        const d = g.dx < 0 ? -Math.min(90, -g.dx * 0.75) : 0;
+        tx.setValue(d);
+        if (d <= -52 && !passed.current) { passed.current = true; buzz(10); }
+        if (d > -52) passed.current = false;
+      },
+      onPanResponderRelease: (_, g) => {
+        if (g.dx < -70) live.current.onReply(live.current.item);
+        Animated.spring(tx, { toValue: 0, useNativeDriver: true, bounciness: 8 }).start();
+      },
+      onPanResponderTerminate: () => Animated.spring(tx, { toValue: 0, useNativeDriver: true }).start(),
+    }),
+  ).current;
+
+  const isMedia = item.type === "media";
+  const bubbleShape = mine
+    ? { borderTopRightRadius: joinsPrev ? 6 : 22, borderBottomRightRadius: joinsNext ? 6 : 22 }
+    : { borderTopLeftRadius: joinsPrev ? 6 : 22, borderBottomLeftRadius: joinsNext ? 6 : 22 };
+  const iconOpacity = tx.interpolate({ inputRange: [-60, -20, 0], outputRange: [1, 0.2, 0], extrapolate: "clamp" });
+  const iconScale = tx.interpolate({ inputRange: [-60, -20, 0], outputRange: [1, 0.6, 0.4], extrapolate: "clamp" });
+
+  function longPress() {
+    const open = (rect) => onOpenMenu(item, rect);
+    buzz(18);
+    const node = bubbleRef.current;
+    if (node && node.measureInWindow) node.measureInWindow((x, y, w, h) => open({ x, y, w, h }));
+    else open(null);
+  }
+
+  return (
+    <View>
+      {showTime && <Text style={styles.dmTimeSep}>{dmTimeLabel(item.createdAt)}</Text>}
+      <View style={[styles.dmRow, mine && styles.dmRowMine, { marginTop: joinsPrev ? 2 : 10, paddingLeft: selectMode ? 34 : 0 }]}>
+        {selectMode && (
+          <View pointerEvents="none" style={{ position: "absolute", left: 2, top: 0, bottom: 0, justifyContent: "center", opacity: mine ? 1 : 0.3 }}>
+            <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: selected ? C.accent : C.textMuted, backgroundColor: selected ? C.accent : "transparent", alignItems: "center", justifyContent: "center" }}>
+              {selected ? <Ionicons name="checkmark" size={14} color={C.white} /> : null}
+            </View>
           </View>
-          <Pressable style={styles.sheetRow} onPress={() => { onClose(); onReply(); }}>
-            <Ionicons name="arrow-undo-outline" size={20} color={C.text} />
-            <Text style={styles.sheetRowText}>Reply</Text>
-          </Pressable>
-          {mine ? (
-            <Pressable style={styles.sheetRow} onPress={() => { onClose(); onDelete(); }}>
-              <Ionicons name="trash-outline" size={20} color={danger} />
-              <Text style={[styles.sheetRowText, { color: danger }]}>Delete</Text>
-            </Pressable>
-          ) : null}
-          <Pressable style={[styles.sheetRow, { justifyContent: "center", marginTop: 4 }]} onPress={onClose}>
-            <Text style={[styles.sheetRowText, { color: C.textMuted }]}>Cancel</Text>
-          </Pressable>
-        </Pressable>
-      </Pressable>
+        )}
+        {!mine && (
+          <View style={styles.dmAvatarCol}>
+            {!joinsNext ? <UserAvatar name={who?.name || item.userName} avatarUrl={who?.avatarUrl} thumbUrl={who?.avatarThumbUrl} size={28} /> : null}
+          </View>
+        )}
+        <View style={{ maxWidth: "76%", alignItems: mine ? "flex-end" : "flex-start" }}>
+          {!mine && !isDirectRoom && !joinsPrev ? <Text style={styles.dmSender}>{who?.name || item.userName}</Text> : null}
+          <Animated.View {...swipe.panHandlers} style={{ transform: [{ translateX: tx }]}}>
+            <Animated.View style={{ transform: [{ scale: pop }] }}>
+              <Pressable
+                ref={bubbleRef}
+                collapsable={false}
+                delayLongPress={320}
+                onPressIn={() => !selectMode && Animated.spring(pop, { toValue: 0.96, useNativeDriver: true, speed: 40, bounciness: 0 }).start()}
+                onPressOut={() => Animated.spring(pop, { toValue: 1, useNativeDriver: true, speed: 30, bounciness: 8 }).start()}
+                onLongPress={selectMode ? undefined : longPress}
+                style={[styles.dmBubble, mine ? styles.dmBubbleMine : styles.dmBubbleTheirs, isMedia && styles.dmBubbleMedia, bubbleShape]}
+              >
+                {item.replyTo ? <ReplyQuote reply={item.replyTo} meId={meId} onMine={mine} onPress={onQuotePress} /> : null}
+                <MessageBody item={item} isMe={mine} />
+                {item.editedAt && item.type === "text" ? (
+                  <Text style={{ fontSize: 10, marginTop: 2, alignSelf: "flex-end", color: mine ? "rgba(255,255,255,0.75)" : C.textMuted }}>Edited</Text>
+                ) : null}
+              </Pressable>
+            </Animated.View>
+          </Animated.View>
+          {/* the reply arrow that appears behind the bubble as you drag it left */}
+          <Animated.View pointerEvents="none" style={{ position: "absolute", right: -34, top: 0, bottom: 0, justifyContent: "center", opacity: iconOpacity, transform: [{ scale: iconScale }] }}>
+            <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: C.surfaceRaised, alignItems: "center", justifyContent: "center" }}>
+              <Ionicons name="arrow-undo" size={16} color={C.text} />
+            </View>
+          </Animated.View>
+          {Array.isArray(item.reactions) && item.reactions.length > 0 && (
+            <View style={[styles.dmReactions, mine ? { marginRight: 10 } : { marginLeft: 10 }]}>
+              <ReactionChips reactions={item.reactions} meId={meId} onMine={false} onToggle={(emoji) => onReactToggle(item, emoji)} />
+            </View>
+          )}
+        </View>
+        {/* in select mode a tap anywhere on the row toggles it */}
+        {selectMode && <Pressable style={StyleSheet.absoluteFill} onPress={() => onToggleSelect(item)} />}
+      </View>
+    </View>
+  );
+}
+
+// Long-press menu: the message "lifts" out of the chat, an emoji bar pops in above it and the actions below.
+function MessageMenu({ target, meId, onClose, onReact, onReply, onEdit, onDelete, onSelect }) {
+  const appear = useRef(new Animated.Value(0)).current;
+  const pops = useRef(REACTION_EMOJIS.map(() => new Animated.Value(0))).current;
+  const [expanded, setExpanded] = useState(false);
+  const item = target?.item;
+  const { width: W, height: H } = Dimensions.get("window");
+
+  useEffect(() => {
+    if (!item) return;
+    appear.setValue(0);
+    pops.forEach((p) => p.setValue(0));
+    setExpanded(false);
+    Animated.spring(appear, { toValue: 1, useNativeDriver: true, speed: 18, bounciness: 7 }).start();
+    Animated.stagger(35, pops.map((p) => Animated.spring(p, { toValue: 1, useNativeDriver: true, speed: 22, bounciness: 14 }))).start();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item?.id]);
+
+  if (!item) return null;
+  const mine = item.userId === meId;
+  const myReaction = (item.reactions || []).find((r) => r.userId === meId)?.emoji;
+  const danger = C.danger || "#E5484D";
+  const left = item.createdAt ? EDIT_WINDOW_MS - (Date.now() - new Date(item.createdAt).getTime()) : 0;
+  const canEdit = mine && item.type === "text" && left > 0;
+  const rows = [
+    { key: "reply", icon: "arrow-undo-outline", label: "Reply", run: onReply },
+    ...(canEdit ? [{ key: "edit", icon: "create-outline", label: "Edit", sub: `${Math.max(1, Math.ceil(left / 60000))} min left`, run: onEdit }] : []),
+    ...(mine ? [{ key: "select", icon: "checkmark-circle-outline", label: "Select", run: onSelect }] : []),
+    ...(mine ? [{ key: "delete", icon: "trash-outline", label: "Delete", danger: true, run: onDelete }] : []),
+  ];
+
+  function close(after) {
+    Animated.timing(appear, { toValue: 0, duration: 130, useNativeDriver: true }).start(() => {
+      onClose();
+      if (after) after();
+    });
+  }
+
+  // ---- layout: keep the emoji bar, the message and the menu all on screen ----
+  const BAR_W = REACTION_EMOJIS.length * 44 + 44 + 16, BAR_H = 54, MENU_W = 210, MENU_H = rows.length * 48 + 8, GAP = 10;
+  const rect = target.rect || { x: mine ? W - 120 : 12, y: H / 2 - 20, w: 108, h: 40 };
+  const prevH = Math.min(rect.h, H * 0.34);
+  const total = BAR_H + GAP + prevH + GAP + MENU_H;
+  const topLimit = 56, bottomLimit = H - 24;
+  let top = rect.y - BAR_H - GAP;
+  if (top < topLimit) top = topLimit;
+  if (top + total > bottomLimit) top = Math.max(topLimit, bottomLimit - total);
+  const prevTop = top + BAR_H + GAP;
+  const menuTop = prevTop + prevH + GAP;
+  const align = (w) => Math.min(Math.max(8, mine ? rect.x + rect.w - w : rect.x), W - w - 8);
+  const dy = appear.interpolate({ inputRange: [0, 1], outputRange: [rect.y - prevTop, 0] });
+  const rise = appear.interpolate({ inputRange: [0, 1], outputRange: [14, 0] });
+  const web = Platform.OS === "web" ? { backdropFilter: "blur(8px)" } : null;
+  const card = { backgroundColor: C.surface, borderRadius: 24, shadowColor: "#000", shadowOpacity: 0.3, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 12 };
+
+  return (
+    <Modal visible transparent animationType="none" statusBarTranslucent onRequestClose={() => close()}>
+      <View style={{ flex: 1 }}>
+        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.6)", opacity: appear }, web]} />
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => close()} />
+
+        {expanded ? (
+          <Animated.View style={[card, { position: "absolute", left: 16, right: 16, top: Math.max(topLimit, H / 2 - 150), padding: 12, opacity: appear, transform: [{ scale: appear.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] }) }] }]}>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center" }}>
+              {MORE_EMOJIS.map((e) => (
+                <Pressable key={e} onPress={() => close(() => onReact(e))} style={[styles.emojiBtn, { width: "14.28%", height: 46, borderRadius: 12 }, myReaction === e && styles.emojiBtnActive]}>
+                  <Text style={{ fontSize: 26 }}>{e}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </Animated.View>
+        ) : (
+          <>
+            {/* emoji bar */}
+            <Animated.View style={[card, { position: "absolute", top, left: align(BAR_W), width: BAR_W, height: BAR_H, borderRadius: BAR_H / 2, flexDirection: "row", alignItems: "center", justifyContent: "space-around", paddingHorizontal: 8, opacity: appear, transform: [{ translateY: rise }, { scale: appear.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }) }] }]}>
+              {REACTION_EMOJIS.map((e, i) => (
+                <Animated.View key={e} style={{ opacity: pops[i], transform: [{ scale: pops[i].interpolate({ inputRange: [0, 1], outputRange: [0.2, 1] }) }, { translateY: pops[i].interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }] }}>
+                  <Pressable onPress={() => close(() => onReact(e))} style={[styles.emojiBtn, { width: 42, height: 42 }, myReaction === e && styles.emojiBtnActive]}>
+                    <Text style={{ fontSize: 26 }}>{e}</Text>
+                  </Pressable>
+                </Animated.View>
+              ))}
+              <Pressable onPress={() => setExpanded(true)} style={[styles.emojiBtn, { width: 36, height: 36, backgroundColor: C.surfaceRaised }]} accessibilityLabel="More emojis">
+                <Ionicons name="add" size={20} color={C.text} />
+              </Pressable>
+            </Animated.View>
+
+            {/* the message, lifted out of the chat */}
+            <Animated.View pointerEvents="none" style={{ position: "absolute", top: prevTop, left: rect.x, width: rect.w, maxHeight: prevH, overflow: "hidden", borderRadius: 22, transform: [{ translateY: dy }, { scale: appear.interpolate({ inputRange: [0, 1], outputRange: [1, 1.03] }) }] }}>
+              <View style={[styles.dmBubble, mine ? styles.dmBubbleMine : styles.dmBubbleTheirs, item.type === "media" && styles.dmBubbleMedia]}>
+                {item.replyTo ? <ReplyQuote reply={item.replyTo} meId={meId} onMine={mine} onPress={() => {}} /> : null}
+                <MessageBody item={item} isMe={mine} />
+              </View>
+            </Animated.View>
+
+            {/* actions */}
+            <Animated.View style={[card, { position: "absolute", top: menuTop, left: align(MENU_W), width: MENU_W, paddingVertical: 4, borderRadius: 18, opacity: appear, transform: [{ translateY: rise }, { scale: appear.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }) }] }]}>
+              {rows.map((r) => (
+                <Pressable key={r.key} onPress={() => close(r.run)} style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: 12, height: 48, paddingHorizontal: 16 }, pressed && { backgroundColor: C.surfaceRaised }]}>
+                  <Ionicons name={r.icon} size={20} color={r.danger ? danger : C.text} />
+                  <Text style={[styles.sheetRowText, { flex: 1 }, r.danger && { color: danger }]}>{r.label}</Text>
+                  {r.sub ? <Text style={{ color: C.textMuted, fontSize: 12 }}>{r.sub}</Text> : null}
+                </Pressable>
+              ))}
+            </Animated.View>
+          </>
+        )}
+      </View>
     </Modal>
   );
 }
@@ -1831,6 +2194,7 @@ function ConnectionsModal({ visible, initialTab, data, loading, onClose, authedA
   }
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <EdgeSwipeBack onBack={onClose}>
       <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
         <FlowHeader title="Connections" onBack={onClose} backIcon="close" />
         <View style={styles.connTabs}>
@@ -1866,6 +2230,7 @@ function ConnectionsModal({ visible, initialTab, data, loading, onClose, authedA
           )}
         />
       </SafeAreaView>
+      </EdgeSwipeBack>
     </Modal>
   );
 }
@@ -2891,6 +3256,7 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
   const hasUnread = items.some((n) => !n.read);
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <EdgeSwipeBack onBack={onClose}>
       <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
         <View style={[styles.header, styles.profileHeaderRow]}>
           <Pressable onPress={onClose} hitSlop={10} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -2965,6 +3331,7 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
           onClose={() => setConfirmClear(false)}
         />
       </SafeAreaView>
+      </EdgeSwipeBack>
     </Modal>
   );
 }
@@ -4579,6 +4946,7 @@ function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, a
   const titles = { main: "Settings and activity", accounts: "Accounts", appearance: "Appearance", notifications: "Notifications" };
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={() => (page === "main" ? onClose() : setPage("main"))}>
+      <EdgeSwipeBack onBack={() => (page === "main" ? onClose() : setPage("main"))}>
       <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
         <View style={styles.setHeader}>
           <Pressable style={styles.setBack} onPress={() => (page === "main" ? onClose() : setPage("main"))} hitSlop={10}>
@@ -4649,6 +5017,7 @@ function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, a
           <View style={{ height: 30 }} />
         </ScrollView>
       </SafeAreaView>
+      </EdgeSwipeBack>
     </Modal>
   );
 }
