@@ -304,6 +304,10 @@ function AppRoot() {
   }
 
   const listRef = useRef(null);
+  // True while a chat is still opening: the list keeps jumping to the newest message as it
+  // renders and measures items, then lets go as soon as the person scrolls (or after a moment).
+  const pinToBottomRef = useRef(false);
+  const pinTimerRef = useRef(null);
   // Latest screen state for notification callbacks (socket handlers are created once per login).
   const screenRef = useRef(screen);
   const mainTabRef = useRef(mainTab);
@@ -533,6 +537,9 @@ function AppRoot() {
     const onRoomState = (state) => {
       setMessages(state.messages || []);
       setRoomMembers(state.members || []);
+      pinToBottomRef.current = true;
+      clearTimeout(pinTimerRef.current);
+      pinTimerRef.current = setTimeout(() => { pinToBottomRef.current = false; }, 1500);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 100);
     };
     const onNewMessage = (m) => {
@@ -565,6 +572,8 @@ function AppRoot() {
       socket.emit("leave_room", { roomId: activeRoom.id });
       socket.off("message_deleted", onDeleted);
       socket.off("message_reaction", onReaction);
+      clearTimeout(pinTimerRef.current);
+      pinToBottomRef.current = false;
       socket.off("room_state", onRoomState);
       socket.off("new_message", onNewMessage);
       socket.off("members_changed", onMembers);
@@ -1103,6 +1112,9 @@ function AppRoot() {
           style={styles.chat}
           data={messages}
           keyExtractor={(item) => item.id}
+          initialNumToRender={30}
+          onContentSizeChange={() => { if (pinToBottomRef.current) listRef.current?.scrollToEnd({ animated: false }); }}
+          onScrollBeginDrag={() => { pinToBottomRef.current = false; }}
           onScrollToIndexFailed={(info) =>
             listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true })
           }
