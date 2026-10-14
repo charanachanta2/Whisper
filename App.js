@@ -268,6 +268,9 @@ function AppRoot() {
   const [roomMembers, setRoomMembers] = useState([]);
   const [activeVoiceRoom, setActiveVoiceRoom] = useState(null); // { id, name }
   const [message, setMessage] = useState("");
+  const [replyingTo, setReplyingTo] = useState(null); // message being replied to
+  const [actionMsg, setActionMsg] = useState(null); // message whose react/reply/delete sheet is open
+  const [deleteTarget, setDeleteTarget] = useState(null); // message awaiting delete confirmation
   const [messages, setMessages] = useState([]);
   const [socket, setSocket] = useState(null);
   const [socketReady, setSocketReady] = useState(false);
@@ -524,6 +527,7 @@ function AppRoot() {
     if (!socket || !activeRoom) return;
     setMessages([]);
     setRoomMembers([]);
+    setReplyingTo(null);
     socket.emit("join_room", { roomId: activeRoom.id });
 
     const onRoomState = (state) => {
@@ -537,14 +541,30 @@ function AppRoot() {
     };
     const onMembers = (members) => setRoomMembers(members);
     const onErr = (msg) => Alert.alert("Chat", msg);
+    // Someone deleted a message: drop it, and blank the quote in any replies that pointed at it.
+    const onDeleted = ({ messageId, repliesUpdated = [] }) => {
+      setMessages((old) =>
+        old
+          .filter((m) => m.id !== messageId)
+          .map((m) => (repliesUpdated.includes(m.id) && m.replyTo ? { ...m, replyTo: { ...m.replyTo, type: "deleted", text: "" } } : m)),
+      );
+      setReplyingTo((r) => (r && r.id === messageId ? null : r));
+      setActionMsg((a) => (a && a.id === messageId ? null : a));
+    };
+    const onReaction = ({ messageId, reactions }) =>
+      setMessages((old) => old.map((m) => (m.id === messageId ? { ...m, reactions: reactions || [] } : m)));
 
     socket.on("room_state", onRoomState);
     socket.on("new_message", onNewMessage);
     socket.on("members_changed", onMembers);
     socket.on("error_message", onErr);
+    socket.on("message_deleted", onDeleted);
+    socket.on("message_reaction", onReaction);
 
     return () => {
       socket.emit("leave_room", { roomId: activeRoom.id });
+      socket.off("message_deleted", onDeleted);
+      socket.off("message_reaction", onReaction);
       socket.off("room_state", onRoomState);
       socket.off("new_message", onNewMessage);
       socket.off("members_changed", onMembers);
@@ -775,16 +795,19 @@ function AppRoot() {
 
     const text = message.trim();
     const outgoingType = type;
+    const replyTarget = replyingTo; // keep a copy so we can put it back if the send fails
+    if (replyTarget) setReplyingTo(null);
     // Optimistically clear the box, but put the text back if the server
     // tells us the send failed (or if it times out) so nothing is lost.
     if (outgoingType === "text") setMessage("");
 
     socket.timeout(8000).emit(
       "send_message",
-      { roomId: activeRoom.id, type: outgoingType, text, ...extra },
+      { roomId: activeRoom.id, type: outgoingType, text, ...(replyTarget ? { replyToId: replyTarget.id } : {}), ...extra },
       (err, ack) => {
         if (err || !ack?.ok) {
           if (outgoingType === "text") setMessage(text);
+          if (replyTarget) setReplyingTo(replyTarget);
           Alert.alert(
             "Message not sent",
             err ? "The server didn't respond in time. Please try again." : ack?.error || "Please try again.",
@@ -792,6 +815,24 @@ function AppRoot() {
         }
       },
     );
+  }
+
+  // ---- Reply / react / delete ----
+  function reactTo(msg, emoji) {
+    if (!socket || !socketReady || !activeRoom) return Alert.alert("Not connected", "Check your connection and try again.");
+    socket.timeout(8000).emit("react_message", { roomId: activeRoom.id, messageId: msg.id, emoji }, (err, ack) => {
+      if (err || !ack?.ok) Alert.alert("Couldn't react", err ? "The server didn't respond in time." : ack?.error || "Please try again.");
+    });
+  }
+  function deleteMsg(msg) {
+    if (!socket || !socketReady || !activeRoom) return Alert.alert("Not connected", "Check your connection and try again.");
+    socket.timeout(8000).emit("delete_message", { roomId: activeRoom.id, messageId: msg.id }, (err, ack) => {
+      if (err || !ack?.ok) Alert.alert("Couldn't delete", err ? "The server didn't respond in time." : ack?.error || "Please try again.");
+    });
+  }
+  function scrollToMessage(id) {
+    const index = messages.findIndex((m) => m.id === id);
+    if (index >= 0) listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 });
   }
 
   async function pickPhoto() {
@@ -1062,8 +1103,13 @@ function AppRoot() {
           style={styles.chat}
           data={messages}
           keyExtractor={(item) => item.id}
+          onScrollToIndexFailed={(info) =>
+            listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true })
+          }
           renderItem={({ item }) => (
-            <View
+            <Pressable
+              delayLongPress={350}
+              onLongPress={() => setActionMsg(item)}
               style={[styles.message, item.userId === me?.id && styles.myMessage]}
             >
               {item.userId !== me?.id && (
@@ -1074,14 +1120,23 @@ function AppRoot() {
                   <Text style={styles.messageUser}>{item.userName}</Text>
                 </View>
               )}
+              {item.replyTo ? (
+                <ReplyQuote reply={item.replyTo} meId={me?.id} onMine={item.userId === me?.id} onPress={() => scrollToMessage(item.replyTo.id)} />
+              ) : null}
               <MessageBody item={item} isMe={item.userId === me?.id} />
-              <Text style={[styles.time, item.userId === me?.id && styles.myTime]}>
-                {new Date(item.createdAt).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </Text>
-            </View>
+              <View style={styles.bubbleFooter}>
+                <Pressable hitSlop={10} onPress={() => setActionMsg(item)}>
+                  <Ionicons name="ellipsis-horizontal" size={16} color={item.userId === me?.id ? "rgba(255,255,255,0.7)" : C.textFaint} />
+                </Pressable>
+                <Text style={[styles.time, item.userId === me?.id && styles.myTime, { marginTop: 0 }]}>
+                  {new Date(item.createdAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </Text>
+              </View>
+              <ReactionChips reactions={item.reactions} meId={me?.id} onMine={item.userId === me?.id} onToggle={(emoji) => reactTo(item, emoji)} />
+            </Pressable>
           )}
           ListEmptyComponent={
             <Text style={styles.empty}>
@@ -1093,6 +1148,19 @@ function AppRoot() {
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
+          {replyingTo ? (
+            <View style={styles.replyBar}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.replyBarName} numberOfLines={1}>
+                  Replying to {replyingTo.userId === me?.id ? "yourself" : replyingTo.userName}
+                </Text>
+                <Text style={styles.replyBarText} numberOfLines={1}>{quoteText(replyingTo)}</Text>
+              </View>
+              <Pressable onPress={() => setReplyingTo(null)} hitSlop={10}>
+                <Ionicons name="close" size={20} color={C.textMuted} />
+              </Pressable>
+            </View>
+          ) : null}
           <View style={styles.attachRow}>
             <Pressable style={styles.plusButton} onPress={toggleAttachMenu} disabled={uploading} hitSlop={6}>
               {uploading ? (
@@ -1152,6 +1220,20 @@ function AppRoot() {
             </Pressable>
           </View>
         </KeyboardAvoidingView>
+        <MessageActions
+          message={actionMsg}
+          meId={me?.id}
+          onClose={() => setActionMsg(null)}
+          onReact={(emoji) => actionMsg && reactTo(actionMsg, emoji)}
+          onReply={() => actionMsg && setReplyingTo(actionMsg)}
+          onDelete={() => actionMsg && setDeleteTarget(actionMsg)}
+        />
+        <ActionSheet
+          visible={!!deleteTarget}
+          title="Delete this message for everyone?"
+          actions={[{ label: "Delete for everyone", icon: "trash-outline", destructive: true, onPress: () => deleteTarget && deleteMsg(deleteTarget) }]}
+          onClose={() => setDeleteTarget(null)}
+        />
       </SafeAreaView>
     );
   }
@@ -1219,6 +1301,94 @@ function AppRoot() {
         onOpenItem={(n) => { setNotifOpen(false); openFromNotification(n); }}
       />
     </SafeAreaView>
+  );
+}
+
+// ---- Reply / react helpers ----
+const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+// One-line description of a message (or of the snapshot stored inside a reply).
+function quoteText(m) {
+  if (!m) return "";
+  if (m.type === "deleted") return "This message was deleted";
+  if (m.type === "text") return m.text || "";
+  if (m.type === "music") return `♫ ${m.title || m.text || "Shared track"}`;
+  const mime = m.mimeType || "";
+  if (m.type === "audio" || mime.startsWith("audio/")) return "🎧 Audio";
+  if (mime.startsWith("image/")) return "📷 Photo";
+  if (mime.startsWith("video/")) return "🎬 Video";
+  return `📎 ${m.fileName || "File"}`;
+}
+
+// The small quoted block shown at the top of a reply bubble. Tap to jump to the original.
+function ReplyQuote({ reply, meId, onMine, onPress }) {
+  const deleted = reply.type === "deleted";
+  return (
+    <Pressable onPress={deleted ? undefined : onPress} style={[styles.quote, onMine && styles.quoteMine]}>
+      <Text style={[styles.quoteName, onMine && { color: C.white }]} numberOfLines={1}>
+        {reply.userId === meId ? "You" : reply.userName}
+      </Text>
+      <Text style={[styles.quoteText, onMine && { color: "rgba(255,255,255,0.85)" }, deleted && { fontStyle: "italic" }]} numberOfLines={2}>
+        {quoteText(reply)}
+      </Text>
+    </Pressable>
+  );
+}
+
+// Reactions under a bubble, grouped by emoji with a count. Tap a chip to react the same way / remove yours.
+function ReactionChips({ reactions, meId, onMine, onToggle }) {
+  if (!Array.isArray(reactions) || !reactions.length) return null;
+  const groups = [];
+  for (const r of reactions) {
+    const g = groups.find((x) => x.emoji === r.emoji);
+    if (g) { g.count += 1; if (r.userId === meId) g.mine = true; }
+    else groups.push({ emoji: r.emoji, count: 1, mine: r.userId === meId });
+  }
+  return (
+    <View style={styles.reactionRow}>
+      {groups.map((g) => (
+        <Pressable key={g.emoji} onPress={() => onToggle(g.emoji)} style={[styles.reactionChip, onMine && styles.reactionChipOnMine, g.mine && styles.reactionChipMine]}>
+          <Text style={styles.reactionEmoji}>{g.emoji}</Text>
+          {g.count > 1 ? <Text style={styles.reactionCount}>{g.count}</Text> : null}
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+// Long-press (or "..." button) menu for a message: pick an emoji, reply, or delete your own.
+function MessageActions({ message, meId, onClose, onReact, onReply, onDelete }) {
+  if (!message) return null;
+  const mine = message.userId === meId;
+  const myReaction = (message.reactions || []).find((r) => r.userId === meId)?.emoji;
+  const danger = C.danger || "#E5484D";
+  return (
+    <Modal visible animationType="fade" transparent onRequestClose={onClose}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={[styles.modalSheet, { paddingBottom: 24 }]} onPress={() => {}}>
+          <View style={styles.emojiRow}>
+            {REACTION_EMOJIS.map((e) => (
+              <Pressable key={e} onPress={() => { onClose(); onReact(e); }} style={[styles.emojiBtn, myReaction === e && styles.emojiBtnActive]}>
+                <Text style={styles.emojiText}>{e}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <Pressable style={styles.sheetRow} onPress={() => { onClose(); onReply(); }}>
+            <Ionicons name="arrow-undo-outline" size={20} color={C.text} />
+            <Text style={styles.sheetRowText}>Reply</Text>
+          </Pressable>
+          {mine ? (
+            <Pressable style={styles.sheetRow} onPress={() => { onClose(); onDelete(); }}>
+              <Ionicons name="trash-outline" size={20} color={danger} />
+              <Text style={[styles.sheetRowText, { color: danger }]}>Delete</Text>
+            </Pressable>
+          ) : null}
+          <Pressable style={[styles.sheetRow, { justifyContent: "center", marginTop: 4 }]} onPress={onClose}>
+            <Text style={[styles.sheetRowText, { color: C.textMuted }]}>Cancel</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -4369,6 +4539,24 @@ function buildStyles(C) {
   messageText: { color: C.text, fontSize: 16, lineHeight: 22 },
   time: { color: C.textFaint, fontSize: 10, marginTop: 8, alignSelf: "flex-end" },
   myTime: { color: "rgba(255,255,255,0.65)" },
+  bubbleFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 16, marginTop: 8 },
+  quote: { backgroundColor: C.surfaceRaised, borderLeftWidth: 3, borderLeftColor: C.accent, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10, marginBottom: 8 },
+  quoteMine: { backgroundColor: "rgba(255,255,255,0.18)", borderLeftColor: C.white },
+  quoteName: { color: C.accent, fontSize: 12, fontWeight: "800", marginBottom: 2 },
+  quoteText: { color: C.textMuted, fontSize: 13 },
+  replyBar: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8, paddingHorizontal: 14, borderTopWidth: 1, borderTopColor: C.border, backgroundColor: C.surface },
+  replyBarName: { color: C.accent, fontSize: 12, fontWeight: "800" },
+  replyBarText: { color: C.textMuted, fontSize: 13, marginTop: 1 },
+  reactionRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
+  reactionChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: C.surfaceRaised, borderWidth: 1, borderColor: C.border, borderRadius: 14, paddingVertical: 2, paddingHorizontal: 8 },
+  reactionChipOnMine: { backgroundColor: "rgba(255,255,255,0.18)", borderColor: "rgba(255,255,255,0.3)" },
+  reactionChipMine: { borderColor: C.accent, borderWidth: 1.5 },
+  reactionEmoji: { fontSize: 14 },
+  reactionCount: { color: C.text, fontSize: 12, fontWeight: "700" },
+  emojiRow: { flexDirection: "row", justifyContent: "space-around", paddingVertical: 8, marginBottom: 6 },
+  emojiBtn: { width: 46, height: 46, borderRadius: 23, alignItems: "center", justifyContent: "center" },
+  emojiBtnActive: { backgroundColor: C.accentSoft },
+  emojiText: { fontSize: 28 },
   empty: { color: C.textMuted, textAlign: "center", marginTop: 30 },
   attachRow: {
     flexDirection: "row",
