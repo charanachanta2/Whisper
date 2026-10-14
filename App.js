@@ -282,6 +282,8 @@ function AppRoot() {
   const [selectMode, setSelectMode] = useState(false); // multi-select (for deleting several messages)
   const [selectedIds, setSelectedIds] = useState([]);
   const [deleteManyOpen, setDeleteManyOpen] = useState(false);
+  const [profileUser, setProfileUser] = useState(null); // someone else's profile that is open
+  const openProfile = useCallback((p) => { if (p && p.id) setProfileUser(p); }, []);
   const [chatMenuOpen, setChatMenuOpen] = useState(false); // "Delete chat" sheet in a direct chat
   const [messages, setMessages] = useState([]);
   const [socket, setSocket] = useState(null);
@@ -808,6 +810,7 @@ function AppRoot() {
   }
 
   function closeRoom() {
+    setProfileUser(null);
     setEditingMsg(null);
     setSelectMode(false);
     setSelectedIds([]);
@@ -833,6 +836,7 @@ function AppRoot() {
   // Returns "sub" when it only closed something inside the chat (selection, edit, reply), "close" when it
   // left a screen, or false when there is nothing to go back to (the system then handles it, e.g. exits).
   function backStep() {
+    if (profileUser) { setProfileUser(null); return "sub"; }
     if (screen === "chat" && activeRoom) {
       if (menuTarget) { setMenuTarget(null); return "sub"; }
       if (selectMode) { exitSelect(); return "sub"; }
@@ -1251,6 +1255,7 @@ function AppRoot() {
     const otherUser = activeRoom.isDirect ? (roomMembers.find((x) => x.id !== me?.id) || activeRoom.otherUser || null) : null;
     const myMsgCount = selectedIds.length;
     return (
+      <ProfileOpenContext.Provider value={openProfile}>
       <EdgeSwipeBack onBack={closeRoom} enabled={!selectMode}>
       <SafeAreaView style={styles.container}>
         <StatusBar style={C.mode === "light" ? "dark" : "light"} />
@@ -1275,13 +1280,15 @@ function AppRoot() {
             <Ionicons name="chevron-back" size={28} color={C.text} />
           </Pressable>
           {activeRoom.isDirect ? (
-            <UserAvatar name={activeRoom.name} avatarUrl={otherUser?.avatarUrl} thumbUrl={otherUser?.avatarThumbUrl} size={36} />
+            <Pressable onPress={() => otherUser?.id && openProfile(otherUser)} accessibilityLabel="View profile">
+              <UserAvatar name={activeRoom.name} avatarUrl={otherUser?.avatarUrl} thumbUrl={otherUser?.avatarThumbUrl} size={36} />
+            </Pressable>
           ) : (
             <View style={[styles.avatarSm, { backgroundColor: colorFor(activeRoom.name || "C") }]}>
               <Text style={styles.avatarText}>{(activeRoom.name || "C")[0].toUpperCase()}</Text>
             </View>
           )}
-          <View style={{ flex: 1 }}>
+          <Pressable style={{ flex: 1 }} disabled={!activeRoom.isDirect || !otherUser?.id} onPress={() => openProfile(otherUser)}>
             <Text style={styles.dmHeaderName} numberOfLines={1}>{activeRoom.name || "Chat"}</Text>
             <Text style={styles.dmHeaderSub} numberOfLines={1}>
               {!socketReady
@@ -1290,7 +1297,7 @@ function AppRoot() {
                 ? (otherUser?.username ? otherUser.username : "Direct message")
                 : `${roomMembers.length} member${roomMembers.length === 1 ? "" : "s"}`}
             </Text>
-          </View>
+          </Pressable>
           {!activeRoom.isDirect && <ChatHeaderActions room={activeRoom} authedApi={authedApi} onMembersAdded={setRoomMembers} onShare={shareRoomInvite} />}
           {activeRoom.isDirect && (
             <Pressable style={styles.iconButtonSm} onPress={() => setChatMenuOpen(true)} hitSlop={8}>
@@ -1428,8 +1435,16 @@ function AppRoot() {
           actions={[{ label: "Delete chat", icon: "trash-outline", destructive: true, onPress: () => deleteChat(activeRoom) }]}
           onClose={() => setChatMenuOpen(false)}
         />
+        <UserProfileModal
+        person={profileUser}
+        me={me}
+        authedApi={authedApi}
+        onClose={() => setProfileUser(null)}
+        onMessage={(p) => { setProfileUser(null); setTimeout(() => messageFriend(p), 50); }}
+      />
       </SafeAreaView>
       </EdgeSwipeBack>
+      </ProfileOpenContext.Provider>
     );
   }
 
@@ -1454,6 +1469,7 @@ function AppRoot() {
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <StatusBar style={C.mode === "light" ? "dark" : "light"} />
+      <ProfileOpenContext.Provider value={openProfile}>
       <ScrollChromeContext.Provider value={chromeValue}>
       <View style={{ flex: 1 }}>
         {mainTab === "home" && <HomeTab authedApi={authedApi} token={token} me={me} unread={notifUnread} refreshKey={homeRefreshKey} onOpenNotifications={() => setNotifOpen(true)} />}
@@ -1492,6 +1508,14 @@ function AppRoot() {
         )}
       </View>
       </ScrollChromeContext.Provider>
+      </ProfileOpenContext.Provider>
+      <UserProfileModal
+        person={profileUser}
+        me={me}
+        authedApi={authedApi}
+        onClose={() => setProfileUser(null)}
+        onMessage={(p) => { setProfileUser(null); setTimeout(() => messageFriend(p), 50); }}
+      />
       <TabBar active={mainTab} onChange={setMainTab} incomingCount={incomingCount} hide={tabHide} hidden={tabsHidden} onReveal={() => setTabsHidden(false)} />
       <NotificationsModal
         visible={notifOpen}
@@ -2186,6 +2210,7 @@ function StoryViewersSheet({ visible, viewers, onClose }) {
 
 // Followers / following lists opened from the profile counts.
 function ConnectionsModal({ visible, initialTab, data, loading, onClose, authedApi, onChanged }) {
+  const openProfile = useContext(ProfileOpenContext);
   const [tab, setTab] = useState("followers");
   useEffect(() => { if (visible) setTab(initialTab || "followers"); }, [visible, initialTab]);
   const list = (tab === "followers" ? data.followers : data.following) || [];
@@ -2210,11 +2235,13 @@ function ConnectionsModal({ visible, initialTab, data, loading, onClose, authedA
           contentContainerStyle={{ padding: 16 }}
           renderItem={({ item }) => (
             <View style={styles.accountRow}>
-              <UserAvatar name={item.name} avatarUrl={item.avatarUrl} thumbUrl={item.avatarThumbUrl} size={44} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.accountName} numberOfLines={1}>{item.name}</Text>
-                <Text style={styles.roomInfo} numberOfLines={1}>@{item.username}</Text>
-              </View>
+              <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 12 }} onPress={() => { onClose(); setTimeout(() => openProfile(item), 350); }}>
+                <UserAvatar name={item.name} avatarUrl={item.avatarUrl} thumbUrl={item.avatarThumbUrl} size={44} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.accountName} numberOfLines={1}>{item.name}</Text>
+                  <Text style={styles.roomInfo} numberOfLines={1}>@{item.username}</Text>
+                </View>
+              </Pressable>
               <FollowButton person={item} authedApi={authedApi} onChange={() => onChanged && onChanged()} />
               {tab === "followers" && (
                 <Pressable onPress={() => removeFollower(item)} hitSlop={8} style={{ paddingLeft: 10 }} accessibilityLabel="Remove follower">
@@ -2630,6 +2657,117 @@ function VoiceRoomScreen({ room, socket, socketReady, me, onClose }) {
 }
 
 // Follow / Following / Follow back. "Follow back" shows when they follow you and you don't follow them yet.
+// Opens someone else's profile from anywhere (Discover, a post's author, follower lists, the chat header).
+const ProfileOpenContext = createContext(() => {});
+
+// Another person's profile: photo, bio, counts, Follow / Message and the posts you're allowed to see.
+function UserProfileModal({ person, me, authedApi, onClose, onMessage }) {
+  const userId = person?.id;
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [posts, setPosts] = useState([]);
+  const activePost = useActivePost(!userId);
+
+  const load = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await authedApi(`/api/profile/${userId}`);
+      if (res.status === 401) return;
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(d.error || "Couldn't load this profile."); return; }
+      setError(null);
+      setData(d);
+      setPosts(d.posts || []);
+    } catch (_) {
+      setError("Check your connection and try again.");
+    } finally {
+      setLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    setData(null); setPosts([]); setError(null);
+    if (userId) { setLoading(true); load(); }
+  }, [userId]);
+
+  if (!userId) return null;
+  const u = data?.user || person;
+  const connected = !!(u.followedByMe || u.followsMe);
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <EdgeSwipeBack onBack={onClose}>
+        <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+          <View style={[styles.header, styles.profileHeaderRow]}>
+            <Pressable onPress={onClose} hitSlop={10} style={{ flexDirection: "row", alignItems: "center", gap: 6 }} accessibilityLabel="Back">
+              <Ionicons name="chevron-back" size={24} color={C.text} />
+              <Text style={styles.titleSmall} numberOfLines={1}>{u?.username ? `@${u.username}` : "Profile"}</Text>
+            </Pressable>
+          </View>
+          <FlatList
+            data={posts}
+            keyExtractor={(item) => item.id}
+            extraData={activePost.activeId}
+            onViewableItemsChanged={activePost.onViewableItemsChanged}
+            viewabilityConfig={activePost.viewabilityConfig}
+            contentContainerStyle={{ paddingBottom: 24 }}
+            renderItem={({ item }) => (
+              <PostCard item={item} isActive={item.id === activePost.activeId} isOwner={item.userId === me?.id} me={me} authedApi={authedApi} onEdit={() => {}} onDelete={() => {}} onChanged={(p) => setPosts((old) => old.map((x) => (x.id === p.id ? p : x)))} />
+            )}
+            ListHeaderComponent={
+              <>
+                <View style={{ alignItems: "center", marginTop: 20 }}>
+                  <UserAvatar name={u?.name} avatarUrl={u?.avatarUrl} thumbUrl={u?.avatarThumbUrl} size={96} />
+                  <Text style={[styles.titleSmall, { marginTop: 14 }]}>{u?.name}</Text>
+                  <Text style={styles.roomInfo}>@{u?.username}{u?.followsMe && !u?.followedByMe ? " · follows you" : ""}</Text>
+                </View>
+                <View style={styles.bioBlock}>
+                  {u?.bio ? <Text style={styles.bioText}>{u.bio}</Text> : data ? <Text style={styles.bioPlaceholder}>No bio yet.</Text> : null}
+                </View>
+                <View style={styles.statsRow}>
+                  <View style={styles.statPress}>
+                    <Text style={styles.statNumber}>{data ? posts.length : "–"}</Text>
+                    <Text style={styles.statLabel}>Posts</Text>
+                  </View>
+                  <View style={styles.statPress}>
+                    <Text style={styles.statNumber}>{data ? data.followersCount : "–"}</Text>
+                    <Text style={styles.statLabel}>Followers</Text>
+                  </View>
+                  <View style={styles.statPress}>
+                    <Text style={styles.statNumber}>{data ? data.followingCount : "–"}</Text>
+                    <Text style={styles.statLabel}>Following</Text>
+                  </View>
+                </View>
+                {data && !data.user.isMe && (
+                  <View style={{ flexDirection: "row", justifyContent: "center", gap: 10, marginTop: 6, marginBottom: 4 }}>
+                    <FollowButton
+                      person={u}
+                      authedApi={authedApi}
+                      onChange={(next) => { setData((d) => (d ? { ...d, user: { ...d.user, followedByMe: next.followedByMe, followsMe: next.followsMe } } : d)); load(); }}
+                    />
+                    {connected && (
+                      <Pressable style={[styles.smallButton, styles.smallButtonMuted]} onPress={() => onMessage && onMessage(u)}>
+                        <Text style={[styles.buttonText, styles.smallButtonMutedText]}>Message</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                )}
+                <View style={styles.divider} />
+              </>
+            }
+            ListEmptyComponent={
+              loading ? <ActivityIndicator style={{ marginTop: 30 }} />
+              : error ? <Text style={styles.empty}>{error}</Text>
+              : data?.postsHidden ? <Text style={styles.empty}>{`Follow @${u?.username} to see their posts.`}</Text>
+              : <Text style={styles.empty}>No posts yet.</Text>
+            }
+          />
+        </SafeAreaView>
+      </EdgeSwipeBack>
+    </Modal>
+  );
+}
+
 function FollowButton({ person, authedApi, onChange, style }) {
   const [st, setSt] = useState({ followedByMe: !!person.followedByMe, followsMe: !!person.followsMe });
   const [busy, setBusy] = useState(false);
@@ -2665,6 +2803,7 @@ function FollowButton({ person, authedApi, onChange, style }) {
 
 function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }) {
   const chrome = useContext(ScrollChromeContext);
+  const openProfile = useContext(ProfileOpenContext);
   const [query, setQuery] = useState("");
   const [people, setPeople] = useState([]);
   const [suggested, setSuggested] = useState([]);
@@ -2697,11 +2836,13 @@ function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }
   };
   const renderPerson = (person) => (
     <View key={person.id} style={styles.roomCard}>
-      <UserAvatar name={person.name} avatarUrl={person.avatarUrl} thumbUrl={person.avatarThumbUrl} size={48} />
-      <View style={{ flex: 1 }}>
-        <Text style={styles.roomTitle}>{person.name}</Text>
-        <Text style={styles.roomInfo}>@{person.username}{person.followsMe && !person.followedByMe ? " · follows you" : ""}</Text>
-      </View>
+      <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 12 }} onPress={() => openProfile(person)} accessibilityLabel={`View ${person.name}'s profile`}>
+        <UserAvatar name={person.name} avatarUrl={person.avatarUrl} thumbUrl={person.avatarThumbUrl} size={48} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.roomTitle}>{person.name}</Text>
+          <Text style={styles.roomInfo}>@{person.username}{person.followsMe && !person.followedByMe ? " · follows you" : ""}</Text>
+        </View>
+      </Pressable>
       {(person.followedByMe || person.followsMe) && (
         <Pressable style={[styles.smallButton, styles.smallButtonMuted, { marginRight: 8 }]} onPress={() => onMessage(person)}>
           <Text style={[styles.buttonText, styles.smallButtonMutedText]}>Message</Text>
@@ -2928,6 +3069,7 @@ function PostImage({ uri, knownRatio, onDoubleTap, overlays }) {
 // a three-dot menu (Edit / Delete); everyone gets Like and Comment.
 // onChanged(post) receives the server's updated copy after a like/comment.
 function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged, isActive = false }) {
+  const openProfile = useContext(ProfileOpenContext);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [commentsOpen, setCommentsOpen] = useState(false);
@@ -2955,8 +3097,10 @@ function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged, i
   return (
     <View style={styles.igPost}>
       <View style={styles.igHeader}>
-        <UserAvatar name={item.userName} avatarUrl={item.userAvatarUrl} thumbUrl={item.userAvatarThumbUrl} size={34} style={{ marginRight: 10 }} />
-        <Text style={[styles.igName, { flex: 1 }]} numberOfLines={1}>{item.userName}</Text>
+        <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center" }} disabled={isOwner} onPress={() => openProfile({ id: item.userId, name: item.userName, avatarUrl: item.userAvatarUrl, avatarThumbUrl: item.userAvatarThumbUrl })}>
+          <UserAvatar name={item.userName} avatarUrl={item.userAvatarUrl} thumbUrl={item.userAvatarThumbUrl} size={34} style={{ marginRight: 10 }} />
+          <Text style={[styles.igName, { flex: 1 }]} numberOfLines={1}>{item.userName}</Text>
+        </Pressable>
         {isOwner && item.audienceCount != null && (
           <View style={{ flexDirection: "row", alignItems: "center", marginRight: 6 }}>
             <Ionicons name="lock-closed-outline" size={14} color={C.textMuted} />
@@ -5769,7 +5913,8 @@ function buildStyles(C) {
   dmComposer: { paddingHorizontal: 12, paddingVertical: 8 },
   dmInputPill: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 48, borderRadius: 26, paddingLeft: 6, paddingRight: 16, backgroundColor: C.surfaceRaised },
   dmCamBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accent, alignItems: "center", justifyContent: "center" },
-  dmInput: { flex: 1, color: C.text, fontSize: 16, paddingVertical: 10 },
+  // outlineStyle/outlineWidth remove the browser's focus ring around the box on web
+  dmInput: { flex: 1, color: C.text, fontSize: 16, paddingVertical: 10, ...(Platform.OS === "web" ? { outlineStyle: "none", outlineWidth: 0, boxShadow: "none" } : null) },
   dmSendText: { color: C.accent, fontWeight: "800", fontSize: 16 },
   dmListRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 9, borderRadius: 12 },
   dmListName: { color: C.text, fontWeight: "600", fontSize: 15 },
