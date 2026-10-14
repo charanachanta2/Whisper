@@ -1645,27 +1645,28 @@ function editMsLeft(m) { return EDIT_WINDOW_MS - (Date.now() - new Date(m.create
 function canEditMsg(m, meId) { return !!m && m.userId === meId && m.type === "text" && editMsLeft(m) > 0; }
 function buzz(ms = 12) { try { if (Platform.OS !== "web") Vibration.vibrate(ms); } catch (_) {} }
 
-// One chat message: swipe LEFT to reply, long-press to open the animated menu (react / reply / edit / delete / select).
+// One chat message: swipe to reply (your own messages slide LEFT, the other person's slide RIGHT), long-press to open the animated menu (react / reply / edit / delete / select).
 function ChatMessageRow({ item, mine, isDirectRoom, joinsPrev, joinsNext, showTime, who, meId, selectMode, selected, onToggleSelect, onReply, onOpenMenu, onReactToggle, onQuotePress }) {
   const tx = useRef(new Animated.Value(0)).current;
   const pop = useRef(new Animated.Value(1)).current;
   const bubbleRef = useRef(null);
   const passed = useRef(false);
   const live = useRef({});
-  live.current = { selectMode, onReply, item };
+  live.current = { selectMode, onReply, item, dir: mine ? -1 : 1 }; // dir: -1 = swipe left (mine), +1 = swipe right (theirs)
   const swipe = useRef(
     PanResponder.create({
-      // Only a clearly horizontal drag to the LEFT starts it, so vertical scrolling is untouched.
-      onMoveShouldSetPanResponder: (_, g) => !live.current.selectMode && g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.8,
+      // Only a clearly horizontal drag in the right direction starts it, so vertical scrolling is untouched.
+      onMoveShouldSetPanResponder: (_, g) => !live.current.selectMode && g.dx * live.current.dir > 8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.8,
       onPanResponderGrant: () => { passed.current = false; },
       onPanResponderMove: (_, g) => {
-        const d = g.dx < 0 ? -Math.min(90, -g.dx * 0.75) : 0;
-        tx.setValue(d);
-        if (d <= -52 && !passed.current) { passed.current = true; buzz(10); }
-        if (d > -52) passed.current = false;
+        const dir = live.current.dir;
+        const mag = g.dx * dir > 0 ? Math.min(90, Math.abs(g.dx) * 0.75) : 0;
+        tx.setValue(mag * dir);
+        if (mag >= 52 && !passed.current) { passed.current = true; buzz(10); }
+        if (mag < 52) passed.current = false;
       },
       onPanResponderRelease: (_, g) => {
-        if (g.dx < -70) live.current.onReply(live.current.item);
+        if (g.dx * live.current.dir > 70) live.current.onReply(live.current.item);
         Animated.spring(tx, { toValue: 0, useNativeDriver: true, bounciness: 8 }).start();
       },
       onPanResponderTerminate: () => Animated.spring(tx, { toValue: 0, useNativeDriver: true }).start(),
@@ -1676,8 +1677,12 @@ function ChatMessageRow({ item, mine, isDirectRoom, joinsPrev, joinsNext, showTi
   const bubbleShape = mine
     ? { borderTopRightRadius: joinsPrev ? 6 : 22, borderBottomRightRadius: joinsNext ? 6 : 22 }
     : { borderTopLeftRadius: joinsPrev ? 6 : 22, borderBottomLeftRadius: joinsNext ? 6 : 22 };
-  const iconOpacity = tx.interpolate({ inputRange: [-60, -20, 0], outputRange: [1, 0.2, 0], extrapolate: "clamp" });
-  const iconScale = tx.interpolate({ inputRange: [-60, -20, 0], outputRange: [1, 0.6, 0.4], extrapolate: "clamp" });
+  const iconOpacity = mine
+    ? tx.interpolate({ inputRange: [-60, -20, 0], outputRange: [1, 0.2, 0], extrapolate: "clamp" })
+    : tx.interpolate({ inputRange: [0, 20, 60], outputRange: [0, 0.2, 1], extrapolate: "clamp" });
+  const iconScale = mine
+    ? tx.interpolate({ inputRange: [-60, -20, 0], outputRange: [1, 0.6, 0.4], extrapolate: "clamp" })
+    : tx.interpolate({ inputRange: [0, 20, 60], outputRange: [0.4, 0.6, 1], extrapolate: "clamp" });
 
   function longPress() {
     const open = (rect) => onOpenMenu(item, rect);
@@ -1705,6 +1710,12 @@ function ChatMessageRow({ item, mine, isDirectRoom, joinsPrev, joinsNext, showTi
         )}
         <View style={{ maxWidth: "76%", alignItems: mine ? "flex-end" : "flex-start" }}>
           {!mine && !isDirectRoom && !joinsPrev ? <Text style={styles.dmSender}>{who?.name || item.userName}</Text> : null}
+          {/* the reply arrow that appears behind the bubble as you drag it (toward the empty side) */}
+          <Animated.View pointerEvents="none" style={{ position: "absolute", [mine ? "right" : "left"]: 4, top: 0, bottom: 0, justifyContent: "center", opacity: iconOpacity, transform: [{ scale: iconScale }] }}>
+            <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: C.surfaceRaised, alignItems: "center", justifyContent: "center" }}>
+              <Ionicons name="arrow-undo" size={16} color={C.text} />
+            </View>
+          </Animated.View>
           <Animated.View {...swipe.panHandlers} style={{ transform: [{ translateX: tx }]}}>
             <Animated.View style={{ transform: [{ scale: pop }] }}>
               <Pressable
@@ -1723,12 +1734,6 @@ function ChatMessageRow({ item, mine, isDirectRoom, joinsPrev, joinsNext, showTi
                 ) : null}
               </Pressable>
             </Animated.View>
-          </Animated.View>
-          {/* the reply arrow that appears behind the bubble as you drag it left */}
-          <Animated.View pointerEvents="none" style={{ position: "absolute", right: -34, top: 0, bottom: 0, justifyContent: "center", opacity: iconOpacity, transform: [{ scale: iconScale }] }}>
-            <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: C.surfaceRaised, alignItems: "center", justifyContent: "center" }}>
-              <Ionicons name="arrow-undo" size={16} color={C.text} />
-            </View>
           </Animated.View>
           {Array.isArray(item.reactions) && item.reactions.length > 0 && (
             <View style={[styles.dmReactions, mine ? { marginRight: 10 } : { marginLeft: 10 }]}>
