@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -25,7 +25,7 @@ import {
 // which is why the header/status bar area could overlap system content on
 // Android. react-native-safe-area-context works correctly on both
 // platforms and is the standard replacement.
-import { SafeAreaView, SafeAreaProvider } from "react-native-safe-area-context";
+import { SafeAreaView, SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
@@ -239,9 +239,14 @@ export default function App() {
   );
 }
 
+// The floating tab bar hides while you scroll down and comes back when you scroll up.
+// Every tab's list reports its scrolling through this context.
+const ScrollChromeContext = createContext({ onScroll: undefined });
+const TAB_SPACE = 96; // room left under lists so the floating bar never covers the last item
+
 function AppRoot() {
   const [screen, setScreen] = useState("auth"); // auth | main | chat
-  const [mainTab, setMainTab] = useState("chats"); // home | chats | discover | profile
+  const [mainTab, setMainTab] = useState("home"); // home | chats | discover | profile
   const [authMode, setAuthMode] = useState("login");
   const [inviteCode, setInviteCode] = useState("");
   const [name, setName] = useState("");
@@ -276,6 +281,7 @@ function AppRoot() {
   const [socketReady, setSocketReady] = useState(false);
   const [roomsRefreshKey, setRoomsRefreshKey] = useState(0);
   const [notifUnread, setNotifUnread] = useState(0);
+  const [homeRefreshKey, setHomeRefreshKey] = useState(0);
   const [notifOpen, setNotifOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
@@ -310,6 +316,27 @@ function AppRoot() {
   const pinTimerRef = useRef(null);
   // Latest screen state for notification callbacks (socket handlers are created once per login).
   const screenRef = useRef(screen);
+  // Floating tab bar: hidden while scrolling down, back on scroll up (or tap the little handle).
+  const tabHide = useRef(new Animated.Value(0)).current; // 0 = shown, 1 = tucked away
+  const [tabsHidden, setTabsHiddenState] = useState(false);
+  const tabsHiddenRef = useRef(false);
+  const lastScrollY = useRef(0);
+  const setTabsHidden = useCallback((hide) => {
+    if (tabsHiddenRef.current === hide) return;
+    tabsHiddenRef.current = hide;
+    setTabsHiddenState(hide);
+    Animated.timing(tabHide, { toValue: hide ? 1 : 0, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: Platform.OS !== "web" }).start();
+  }, [tabHide]);
+  const onChromeScroll = useCallback((e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    const dy = y - lastScrollY.current;
+    lastScrollY.current = y;
+    if (y <= 24) return setTabsHidden(false);
+    if (dy > 6) setTabsHidden(true);
+    else if (dy < -6) setTabsHidden(false);
+  }, [setTabsHidden]);
+  const chromeValue = useRef({ onScroll: null }).current;
+  chromeValue.onScroll = onChromeScroll;
   const mainTabRef = useRef(mainTab);
   const activeRoomRef = useRef(activeRoom);
   const pendingOpenRef = useRef(null);
@@ -317,6 +344,7 @@ function AppRoot() {
   tokenRef.current = token;
   screenRef.current = screen;
   mainTabRef.current = mainTab;
+  useEffect(() => { lastScrollY.current = 0; setTabsHidden(false); }, [mainTab]);
   activeRoomRef.current = activeRoom;
 
   // Recomputes the actual colors to show (light vs dark) for a given saved
@@ -479,7 +507,7 @@ function AppRoot() {
       return;
     }
     if (n.kind === "friend_request") { setScreen("main"); setMainTab("discover"); }
-    if (n.kind === "post_like" || n.kind === "post_comment") { setScreen("main"); setMainTab("home"); }
+    if (n.kind === "post_like" || n.kind === "post_comment" || n.kind === "post_mention" || n.kind === "story_mention") { setScreen("main"); setMainTab("home"); }
   }
   const openFromNotificationRef = useRef(openFromNotification);
   openFromNotificationRef.current = openFromNotification;
@@ -725,7 +753,7 @@ function AppRoot() {
       setAddingAccount(false);
       setPassword("");
       setScreen("main");
-      setMainTab("chats");
+      setMainTab("home");
     } catch (e) {
       console.error("Auth request failed:", API_URL, e);
       Alert.alert(
@@ -1269,8 +1297,9 @@ function AppRoot() {
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <StatusBar style={C.mode === "light" ? "dark" : "light"} />
+      <ScrollChromeContext.Provider value={chromeValue}>
       <View style={{ flex: 1 }}>
-        {mainTab === "home" && <HomeTab authedApi={authedApi} token={token} me={me} unread={notifUnread} onOpenNotifications={() => setNotifOpen(true)} />}
+        {mainTab === "home" && <HomeTab authedApi={authedApi} token={token} me={me} unread={notifUnread} refreshKey={homeRefreshKey} onOpenNotifications={() => setNotifOpen(true)} />}
         {mainTab === "chats" && (
           <ChatsTab
             authedApi={authedApi}
@@ -1304,13 +1333,16 @@ function AppRoot() {
           />
         )}
       </View>
-      <TabBar active={mainTab} onChange={setMainTab} incomingCount={incomingCount} />
+      </ScrollChromeContext.Provider>
+      <TabBar active={mainTab} onChange={setMainTab} incomingCount={incomingCount} hide={tabHide} hidden={tabsHidden} onReveal={() => setTabsHidden(false)} />
       <NotificationsModal
         visible={notifOpen}
         authedApi={authedApi}
         onClose={() => { setNotifOpen(false); refreshUnread(); }}
         onUnreadChange={setNotifUnread}
         onOpenItem={(n) => { setNotifOpen(false); openFromNotification(n); }}
+        onRequestHandled={() => setRoomsRefreshKey((k) => k + 1)}
+        onStoryAdded={() => setHomeRefreshKey((k) => k + 1)}
       />
     </SafeAreaView>
   );
@@ -1536,28 +1568,40 @@ function AudioAttachment({ uri, fileName, isMe }) {
   );
 }
 
-function TabBar({ active, onChange, incomingCount }) {
+function TabBar({ active, onChange, incomingCount, hide, hidden, onReveal }) {
+  const insets = useSafeAreaInsets();
   const tabs = [
     { key: "home", label: "Home", icon: "home-outline", iconActive: "home" },
     { key: "chats", label: "Chats", icon: "chatbubble-outline", iconActive: "chatbubble" },
     { key: "discover", label: "Discover", icon: "search-outline", iconActive: "search" },
     { key: "profile", label: "Profile", icon: "person-outline", iconActive: "person" },
   ];
+  const bottom = Math.max(insets.bottom, 10) + 6;
+  const translateY = hide.interpolate({ inputRange: [0, 1], outputRange: [0, 140] });
   return (
-    <View style={styles.tabBar}>
-      {tabs.map((tab) => {
-        const isActive = active === tab.key;
-        return (
-          <Pressable key={tab.key} style={styles.tabItem} onPress={() => onChange(tab.key)}>
-            <View>
-              <Ionicons name={isActive ? tab.iconActive : tab.icon} size={22} color={isActive ? C.accent : C.textMuted} />
-              {tab.key === "discover" && incomingCount > 0 && <View style={styles.tabBadge} />}
-            </View>
-            <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>{tab.label}</Text>
-          </Pressable>
-        );
-      })}
-    </View>
+    <>
+      <Animated.View pointerEvents={hidden ? "none" : "box-none"} style={[styles.tabPillWrap, { bottom, transform: [{ translateY }] }]}>
+        <View style={styles.tabPill}>
+          {tabs.map((tab) => {
+            const isActive = active === tab.key;
+            return (
+              <Pressable key={tab.key} accessibilityLabel={tab.label} style={[styles.tabPillItem, isActive && styles.tabPillItemActive]} onPress={() => onChange(tab.key)}>
+                <View>
+                  <Ionicons name={isActive ? tab.iconActive : tab.icon} size={25} color={isActive ? C.text : C.textMuted} />
+                  {tab.key === "discover" && incomingCount > 0 && <View style={styles.tabBadge} />}
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+      </Animated.View>
+      {/* While the bar is tucked away, this little handle brings it back. */}
+      <Animated.View pointerEvents={hidden ? "box-none" : "none"} style={[styles.tabHandleWrap, { bottom: Math.max(insets.bottom, 6) + 2, opacity: hide }]}>
+        <Pressable onPress={onReveal} hitSlop={{ top: 14, bottom: 14, left: 40, right: 40 }} accessibilityLabel="Show tabs">
+          <View style={styles.tabHandle} />
+        </Pressable>
+      </Animated.View>
+    </>
   );
 }
 
@@ -1674,6 +1718,7 @@ function ChatHeaderActions({ room, authedApi, onMembersAdded, onShare }) {
 }
 
 function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOpenNotifications }) {
+  const chrome = useContext(ScrollChromeContext);
   const [subTab, setSubTab] = useState("direct"); // direct | rooms | voice
   const [rooms, setRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(true);
@@ -1775,7 +1820,9 @@ function ChatsTab({ authedApi, onOpen, onOpenVoice, refreshKey, unread = 0, onOp
         <FlatList
           data={list}
           keyExtractor={(r) => r.id}
-          contentContainerStyle={{ padding: 16 }}
+          onScroll={chrome.onScroll}
+          scrollEventThrottle={16}
+          contentContainerStyle={{ padding: 16, paddingBottom: 16 + TAB_SPACE }}
           renderItem={({ item }) => (
             <Pressable
               style={({ pressed }) => [styles.roomCard, pressed && { opacity: 0.8 }]}
@@ -1960,6 +2007,7 @@ function VoiceRoomScreen({ room, socket, socketReady, me, onClose }) {
 }
 
 function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }) {
+  const chrome = useContext(ScrollChromeContext);
   const [query, setQuery] = useState("");
   const [people, setPeople] = useState([]);
   const [incoming, setIncoming] = useState([]);
@@ -1992,6 +2040,17 @@ function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }
     if (!res.ok) return Alert.alert("Couldn't send request", data.error || "Something went wrong.");
     setSentTo((old) => ({ ...old, [person.id]: true }));
   }
+  async function decline(requestId) {
+    try {
+      const res = await authedApi(`/api/friends/requests/${requestId}/decline`, { method: "POST" });
+      if (res.status === 401) return;
+      setIncoming((old) => {
+        const next = old.filter((i) => i.id !== requestId);
+        onIncomingCountChange?.(next.length);
+        return next;
+      });
+    } catch (_) { Alert.alert("Network error", "Check your connection and try again."); }
+  }
   async function accept(requestId) {
     setAcceptingId(requestId);
     try {
@@ -2016,7 +2075,9 @@ function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }
         <Text style={styles.titleSmall}>Discover</Text>
       </View>
       <FlatList
-        contentContainerStyle={{ padding: 16, paddingTop: 0 }}
+        onScroll={chrome.onScroll}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ padding: 16, paddingTop: 0, paddingBottom: 16 + TAB_SPACE }}
         ListHeaderComponent={
           <>
             <View style={styles.searchBox}>
@@ -2048,6 +2109,9 @@ function DiscoverTab({ authedApi, onMessage, onOpenRoom, onIncomingCountChange }
               <View key={item.id} style={styles.roomCard}>
                 <UserAvatar name={item.from?.name} avatarUrl={item.from?.avatarUrl} thumbUrl={item.from?.avatarThumbUrl} size={48} />
                 <Text style={[styles.messageText, { flex: 1 }]}>@{item.from?.username} wants to connect</Text>
+                <Pressable style={[styles.smallButton, styles.smallButtonMuted]} disabled={acceptingId === item.id} onPress={() => decline(item.id)}>
+                  <Text style={[styles.buttonText, styles.smallButtonMutedText]}>Decline</Text>
+                </Pressable>
                 <Pressable style={[styles.smallButton, acceptingId === item.id && styles.smallButtonMuted]} disabled={acceptingId === item.id} onPress={() => accept(item.id)}>
                   <Text style={[styles.buttonText, acceptingId === item.id && styles.smallButtonMutedText]}>{acceptingId === item.id ? "…" : "Accept"}</Text>
                 </Pressable>
@@ -2318,6 +2382,11 @@ function PostCard({ item, isOwner, me, authedApi, onEdit, onDelete, onChanged, i
             <Text style={styles.igName}>{item.userName}</Text>  {item.text}
           </Text>
         )}
+        {(item.mentionUsers || []).length > 0 && (
+          <Text style={styles.igMention} numberOfLines={2}>
+            With {(item.mentionUsers || []).map((u, i) => `${i ? ", " : ""}@${u.username}`).join("")}
+          </Text>
+        )}
         {(item.commentCount || 0) > 0 && (
           <Pressable onPress={() => setCommentsOpen(true)}>
             <Text style={styles.igMuted}>View {item.commentCount === 1 ? "1 comment" : `all ${item.commentCount} comments`}</Text>
@@ -2464,11 +2533,13 @@ function EditPostModal({ visible, post, token, authedApi, onClose, onSaved }) {
   );
 }
 
-const NOTIF_ICONS = { message: "chatbubble", friend_request: "person-add", friend_accept: "people", post_like: "heart", post_comment: "chatbubble-ellipses" };
+const NOTIF_ICONS = { message: "chatbubble", friend_request: "person-add", friend_accept: "people", post_like: "heart", post_comment: "chatbubble-ellipses", post_mention: "at", story_mention: "at" };
 
 // The notification inbox (opened from the bell on Home). Everything stays
 // here until the person deletes it; unread ones carry a dot until opened.
-function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpenItem }) {
+function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpenItem, onRequestHandled, onStoryAdded }) {
+  const [busyId, setBusyId] = useState(null);
+  const [done, setDone] = useState({}); // notification id -> "accepted" | "added"
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -2486,7 +2557,43 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
       setLoading(false);
     }
   }
-  useEffect(() => { if (visible) load(); }, [visible]);
+  useEffect(() => { if (visible) { setDone({}); load(); } }, [visible]);
+
+  // Accept or decline a friend request right from the notification. Declining is silent: the sender is never told.
+  async function respondRequest(n, action) {
+    const requestId = n.requestId || String(n.tag || "").replace(/^friend-/, "");
+    setBusyId(n.id);
+    try {
+      const res = await authedApi(`/api/friends/requests/${requestId}/${action}`, { method: "POST" });
+      if (res.status === 401) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok && res.status !== 404) return Alert.alert(action === "accept" ? "Couldn't accept" : "Couldn't decline", data.error || "Something went wrong.");
+      onUnreadChange(items.filter((x) => !x.read && x.id !== n.id).length);
+      if (res.ok && action === "accept") setDone((d) => ({ ...d, [n.id]: "accepted" }));
+      else setItems((old) => old.filter((x) => x.id !== n.id));
+      onRequestHandled && onRequestHandled(action, data.room);
+    } catch (_) {
+      Alert.alert("Network error", "Check your connection and try again.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+  // Someone mentioned you in their story: put it on your own story ("add it back").
+  async function addToStory(n) {
+    setBusyId(n.id);
+    try {
+      const res = await authedApi(`/api/stories/${n.storyId}/reshare`, { method: "POST" });
+      if (res.status === 401) return;
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) { setDone((d) => ({ ...d, [n.id]: "added" })); onStoryAdded && onStoryAdded(data.story); }
+      else if (res.status === 409) setDone((d) => ({ ...d, [n.id]: "added" }));
+      else Alert.alert("Couldn't add to your story", data.error || "Something went wrong.");
+    } catch (_) {
+      Alert.alert("Network error", "Check your connection and try again.");
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function markAllRead() {
     setItems((old) => old.map((n) => ({ ...n, read: true })));
@@ -2499,6 +2606,7 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
       onUnreadChange(Math.max(0, items.filter((x) => !x.read).length - 1));
       authedApi("/api/notifications/read", { method: "POST", body: JSON.stringify({ ids: [n.id] }) }).catch(() => {});
     }
+    if (n.kind === "friend_request") return; // answered with the buttons on the row itself
     onOpenItem(n);
   }
   async function remove(n) {
@@ -2544,6 +2652,27 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
                 <Text style={styles.messageUser} numberOfLines={1}>{n.title}</Text>
                 <Text style={styles.messageText} numberOfLines={2}>{n.body}</Text>
                 <Text style={[styles.time, { alignSelf: "flex-start", marginTop: 4 }]}>{timeAgo(n.createdAt)}</Text>
+                {n.kind === "friend_request" && (done[n.id] === "accepted" ? (
+                  <Text style={styles.notifDone}>✓ You're now connected</Text>
+                ) : (
+                  <View style={styles.notifActions}>
+                    <Pressable style={[styles.notifBtn, styles.notifBtnPrimary, busyId === n.id && { opacity: 0.6 }]} disabled={busyId === n.id} onPress={() => respondRequest(n, "accept")}>
+                      <Text style={styles.notifBtnPrimaryText}>Accept</Text>
+                    </Pressable>
+                    <Pressable style={[styles.notifBtn, busyId === n.id && { opacity: 0.6 }]} disabled={busyId === n.id} onPress={() => respondRequest(n, "decline")}>
+                      <Text style={styles.notifBtnText}>Decline</Text>
+                    </Pressable>
+                  </View>
+                ))}
+                {n.kind === "story_mention" && n.storyId && (done[n.id] === "added" || n.actioned ? (
+                  <Text style={styles.notifDone}>✓ Added to your story</Text>
+                ) : (
+                  <View style={styles.notifActions}>
+                    <Pressable style={[styles.notifBtn, styles.notifBtnPrimary, busyId === n.id && { opacity: 0.6 }]} disabled={busyId === n.id} onPress={() => addToStory(n)}>
+                      <Text style={styles.notifBtnPrimaryText}>{busyId === n.id ? "Adding…" : "Add to your story"}</Text>
+                    </Pressable>
+                  </View>
+                ))}
               </View>
               {!n.read && <View style={styles.notifDot} />}
               <Pressable onPress={() => remove(n)} hitSlop={10} style={{ padding: 6, marginLeft: 4 }}>
@@ -2563,7 +2692,8 @@ function NotificationsModal({ visible, authedApi, onClose, onUnreadChange, onOpe
   );
 }
 
-function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
+function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications, refreshKey = 0 }) {
+  const chrome = useContext(ScrollChromeContext);
   const [posts, setPosts] = useState([]);
   const [stories, setStories] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
@@ -2590,6 +2720,7 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
     }
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => { if (refreshKey) load(); }, [refreshKey]);
 
   async function deletePost(post) {
     try {
@@ -2626,7 +2757,9 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
         </Pressable>
       </View>
       <FlatList
-        contentContainerStyle={{ paddingBottom: 24 }}
+        contentContainerStyle={{ paddingBottom: 24 + TAB_SPACE }}
+        onScroll={chrome.onScroll}
+        scrollEventThrottle={16}
         refreshing={refreshing}
         onRefresh={() => { setRefreshing(true); load(); }}
         ListHeaderComponent={
@@ -2672,6 +2805,7 @@ function HomeTab({ authedApi, token, me, unread = 0, onOpenNotifications }) {
           onClose={() => setViewer(null)}
           onViewed={(st) => setStories((old) => old.map((x) => (x.id === st.id ? { ...x, viewedByMe: true } : x)))}
           onDeleted={(st) => setStories((old) => old.filter((x) => x.id !== st.id))}
+          onReshared={(orig, copy) => setStories((old) => [...old.map((x) => (x.id === orig.id ? { ...x, canReshare: false } : x)), ...(copy ? [copy] : [])])}
         />
       )}
     </View>
@@ -2932,6 +3066,68 @@ function AudiencePicker({ authedApi, mode, onModeChange, ids, onIdsChange, noun 
   );
 }
 
+// "Tag people": pick friends to mention. They get a notification, can always see the
+// post/story, and for a story they can add it back to their own story.
+function MentionPicker({ authedApi, ids, onIdsChange, noun = "post" }) {
+  const [open, setOpen] = useState(false);
+  const [friends, setFriends] = useState(null);
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    if (!open || friends !== null) return;
+    let off = false;
+    (async () => {
+      try {
+        const res = await authedApi("/api/friends");
+        const data = await res.json().catch(() => ({}));
+        if (!off) setFriends(res.ok ? data.friends || [] : []);
+      } catch (_) { if (!off) setFriends([]); }
+    })();
+    return () => { off = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  const chosen = new Set(ids);
+  const toggle = (id) => onIdsChange(chosen.has(id) ? ids.filter((x) => x !== id) : [...ids, id]);
+  const needle = q.trim().toLowerCase();
+  const shown = (friends || []).filter((f) => !needle || f.name.toLowerCase().includes(needle) || f.username.includes(needle));
+  return (
+    <View style={{ marginBottom: 18 }}>
+      <Pressable style={styles.mentionHeader} onPress={() => setOpen((o) => !o)}>
+        <Ionicons name="at" size={22} color={C.text} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.accountName}>Tag people</Text>
+          <Text style={styles.roomInfo}>{ids.length ? `${ids.length} tagged` : `Mention friends in this ${noun}`}</Text>
+        </View>
+        <Ionicons name={open ? "chevron-up" : "chevron-down"} size={20} color={C.textMuted} />
+      </Pressable>
+      {open && (
+        <View style={{ marginTop: 6 }}>
+          {friends === null ? (
+            <ActivityIndicator style={{ marginTop: 14 }} />
+          ) : friends.length === 0 ? (
+            <Text style={[styles.muted, { textAlign: "center", marginTop: 12 }]}>You have no friends to tag yet.</Text>
+          ) : (
+            <>
+              <TextInput style={[styles.input, { marginTop: 8 }]} placeholder="Search friends" placeholderTextColor={C.textFaint} value={q} onChangeText={setQ} autoCapitalize="none" />
+              {shown.map((f) => (
+                <Pressable key={f.id} style={styles.accountRow} onPress={() => toggle(f.id)}>
+                  <UserAvatar name={f.name} avatarUrl={f.avatarUrl} size={38} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.accountName} numberOfLines={1}>{f.name}</Text>
+                    <Text style={styles.roomInfo} numberOfLines={1}>@{f.username}</Text>
+                  </View>
+                  <Ionicons name={chosen.has(f.id) ? "checkbox" : "square-outline"} size={24} color={chosen.has(f.id) ? C.accent : C.textMuted} />
+                </Pressable>
+              ))}
+              {shown.length === 0 && <Text style={[styles.muted, { textAlign: "center", marginTop: 10 }]}>No match.</Text>}
+            </>
+          )}
+        </View>
+      )}
+      {ids.length > 0 && <Text style={[styles.roomInfo, { marginTop: 6 }]}>Tagged people can always see this {noun}, even if it's limited to selected friends.</Text>}
+    </View>
+  );
+}
+
 // Full-screen "new post" / "new story" flow:
 //   1. choose Photo or Video   2. edit it   3. write a caption and share.
 function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, onDone }) {
@@ -2950,9 +3146,10 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
   // Who can watch: everyone you're friends with, or only the people picked here.
   const [audienceMode, setAudienceMode] = useState("all"); // "all" | "some"
   const [audienceIds, setAudienceIds] = useState([]);
+  const [mentionIds, setMentionIds] = useState([]); // friends tagged in this post/story
 
   useEffect(() => {
-    if (visible) { setAudienceMode("all"); setAudienceIds([]); setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); setDuration(isStory ? 5 : 15); setVideoSec(null); }
+    if (visible) { setMentionIds([]); setAudienceMode("all"); setAudienceIds([]); setStep("pick"); setAsset(null); setEdited(null); setCaption(""); setSharing(false); setOverlays([]); setMusic(null); setDuration(isStory ? 5 : 15); setVideoSec(null); }
   }, [visible]);
 
   async function pick(kind) {
@@ -2994,7 +3191,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
       const playSec = asset?.isVideo ? (videoSec || MAX_VIDEO_SEC) : duration;
       const seg = music ? musicSegment(music, playSec) : null;
       const musicOut = seg ? { ...music, startSec: seg.start, endSec: seg.end } : null;
-      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: isStory ? "" : caption.trim(), media, duration: playSec, music: musicOut, overlays: overlays.filter((o) => o.text.trim()), audience: audienceMode === "some" ? audienceIds : null }) });
+      const res = await authedApi(isStory ? "/api/stories" : "/api/posts", { method: "POST", body: JSON.stringify({ text: isStory ? "" : caption.trim(), media, duration: playSec, music: musicOut, overlays: overlays.filter((o) => o.text.trim()), audience: audienceMode === "some" ? audienceIds : null, mentions: mentionIds }) });
       if (res.status === 401) return;
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return Alert.alert("Couldn't share", data.error || "Something went wrong.");
@@ -3092,6 +3289,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
               </Pressable>
             </View>
             <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16 }}>
+              <MentionPicker authedApi={authedApi} ids={mentionIds} onIdsChange={setMentionIds} noun="story" />
               <AudiencePicker authedApi={authedApi} mode={audienceMode} onModeChange={setAudienceMode} ids={audienceIds} onIdsChange={setAudienceIds} noun="story" />
               {sharing && <Text style={[styles.roomInfo, { textAlign: "center", marginTop: 20 }]}>Uploading... videos can take a little while.</Text>}
             </ScrollView>
@@ -3126,6 +3324,7 @@ function CreateMediaModal({ visible, mode = "post", token, authedApi, onClose, o
                 />
               </View>
               <View style={{ marginTop: 20 }}>
+                <MentionPicker authedApi={authedApi} ids={mentionIds} onIdsChange={setMentionIds} noun="post" />
                 <AudiencePicker authedApi={authedApi} mode={audienceMode} onModeChange={setAudienceMode} ids={audienceIds} onIdsChange={setAudienceIds} noun="post" />
               </View>
               {sharing && <Text style={[styles.roomInfo, { textAlign: "center", marginTop: 20 }]}>Uploading... videos can take a little while.</Text>}
@@ -3814,13 +4013,14 @@ function StoryVideo({ uri, onDuration, muted = false }) {
   return <VideoView style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />;
 }
 
-function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onDeleted }) {
+function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onDeleted, onReshared }) {
   const firstUnseen = (g) => Math.max(0, g.stories.findIndex((s) => !s.viewedByMe));
   const [gi, setGi] = useState(startIndex);
   const [si, setSi] = useState(() => firstUnseen(groups[startIndex]));
   const [tick, setTick] = useState(0);
   const [vidDur, setVidDur] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [adding, setAdding] = useState(false);
   const [box, setBox] = useState({ w: 1, h: 1 });
   const progress = useRef(new Animated.Value(0)).current;
   const group = groups[gi];
@@ -3866,6 +4066,19 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
       onDeleted(story);
       onClose();
     } catch (_) { Alert.alert("Couldn't delete", "Check your connection and try again."); }
+  }
+
+  // Someone tagged you in this story: put it on your own story.
+  async function addToMyStory() {
+    if (adding) return;
+    setAdding(true);
+    try {
+      const res = await authedApi(`/api/stories/${story.id}/reshare`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok || res.status === 409) { onReshared && onReshared(story, res.ok ? data.story : null); Alert.alert("Added", "This story is now on your story."); }
+      else Alert.alert("Couldn't add to your story", data.error || "Something went wrong.");
+    } catch (_) { Alert.alert("Couldn't add to your story", "Check your connection and try again."); }
+    finally { setAdding(false); }
   }
 
   if (!story) return null;
@@ -3923,6 +4136,20 @@ function StoryViewer({ groups, startIndex, me, authedApi, onClose, onViewed, onD
                 <StoryMusic key={story.id} music={story.music} maxPlaySec={isVideo ? null : Math.min(15, Math.max(3, Number(story.duration) || 5))} />
               </View>
             )}
+            {(story.sharedFrom || (story.mentionUsers || []).length > 0 || story.canReshare) && (
+              <View pointerEvents="box-none" style={styles.storyTagWrap}>
+                {story.sharedFrom ? <Text style={styles.storyTagText}>Shared from @{story.sharedFrom.userName}</Text> : null}
+                {!story.sharedFrom && (story.mentionUsers || []).length > 0 ? (
+                  <Text style={styles.storyTagText} numberOfLines={2}>{(story.mentionUsers || []).map((u, i) => `${i ? " " : ""}@${u.username}`).join("")}</Text>
+                ) : null}
+                {story.canReshare ? (
+                  <Pressable style={styles.storyAddBtn} onPress={addToMyStory} disabled={adding}>
+                    <Ionicons name="add-circle-outline" size={20} color="#fff" />
+                    <Text style={styles.storyAddText}>{adding ? "Adding…" : "Add to your story"}</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            )}
             {(!!story.text || isMine) && (
               <View pointerEvents="none" style={styles.storyBottom}>
                 {!!story.text && <Text style={styles.storyCaption}>{story.text}</Text>}
@@ -3947,77 +4174,133 @@ function PostVideo({ uri }) {
   return <VideoView style={styles.postMediaVideo} player={player} allowsFullscreen nativeControls />;
 }
 
-// Theme + account settings, opened from the gear icon on Profile. A modal
-// (not a separate tab) since it's a handful of one-off preferences, not
-// something someone browses regularly.
-function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, authedApi, accounts = [], currentId, currentUsername, onSwitch, onAddAccount }) {
-  const options = [
+// "Settings and activity": full-screen list in the Instagram style -- search box on top,
+// grouped rows (icon, title, value, chevron) and the account actions at the bottom.
+// Opened from the gear icon on Profile.
+function SettingsModal({ visible, onClose, themeMode, onChangeTheme, onLogout, authedApi, accounts = [], currentId, currentUsername, onSwitch, onAddAccount, onEditBio }) {
+  const [page, setPage] = useState("main"); // main | accounts | appearance | notifications
+  const [q, setQ] = useState("");
+  useEffect(() => { if (visible) { setPage("main"); setQ(""); } }, [visible]);
+  const themeOptions = [
     { key: "system", label: "System", icon: "phone-portrait-outline" },
     { key: "light", label: "Light", icon: "sunny-outline" },
     { key: "dark", label: "Dark", icon: "moon-outline" },
   ];
+  const themeLabel = (themeOptions.find((o) => o.key === themeMode) || themeOptions[0]).label;
+  const danger = C.danger || "#E5484D";
+  const sections = [
+    {
+      title: "Your account",
+      rows: [
+        { key: "accounts", icon: "person-circle-outline", title: "Accounts", sub: "Switch accounts or add another one", value: currentUsername ? `@${currentUsername}` : null, onPress: () => setPage("accounts") },
+        ...(onEditBio ? [{ key: "bio", icon: "create-outline", title: "Edit bio", sub: "Change what shows on your profile", onPress: () => { onClose(); onEditBio(); } }] : []),
+      ],
+    },
+    {
+      title: "How you use Hush",
+      rows: [
+        ...(Platform.OS === "web" ? [{ key: "notifications", icon: "notifications-outline", title: "Notifications", sub: "Alerts for messages, likes and requests", onPress: () => setPage("notifications") }] : []),
+        { key: "appearance", icon: "contrast-outline", title: "Appearance", sub: "Light, dark or match your phone", value: themeLabel, onPress: () => setPage("appearance") },
+      ],
+    },
+    {
+      title: "Login",
+      rows: [
+        { key: "add", icon: "person-add-outline", title: "Add account", onPress: () => { onClose(); onAddAccount && onAddAccount(); } },
+        { key: "logout", icon: "log-out-outline", title: currentUsername ? `Log out @${currentUsername}` : "Log out", destructive: true, onPress: onLogout },
+      ],
+    },
+  ];
+  const needle = q.trim().toLowerCase();
+  const shownSections = sections
+    .map((sec) => ({ ...sec, rows: sec.rows.filter((r) => !needle || `${r.title} ${r.sub || ""}`.toLowerCase().includes(needle)) }))
+    .filter((sec) => sec.rows.length);
+
+  const Row = ({ row }) => (
+    <Pressable style={({ pressed }) => [styles.setRow, pressed && { opacity: 0.6 }]} onPress={row.onPress}>
+      <Ionicons name={row.icon} size={26} color={row.destructive ? danger : C.text} style={{ width: 34 }} />
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.setRowTitle, row.destructive && { color: danger }]} numberOfLines={1}>{row.title}</Text>
+        {!!row.sub && <Text style={styles.setRowSub} numberOfLines={2}>{row.sub}</Text>}
+      </View>
+      {!!row.value && <Text style={styles.setRowValue} numberOfLines={1}>{row.value}</Text>}
+      {!row.destructive && <Ionicons name="chevron-forward" size={20} color={C.textMuted} />}
+    </Pressable>
+  );
+
+  const titles = { main: "Settings and activity", accounts: "Accounts", appearance: "Appearance", notifications: "Notifications" };
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.modalBackdrop}>
-        <View style={styles.modalSheet}>
-          <View style={styles.modalHeaderRow}>
-            <Text style={styles.titleSmall}>Settings</Text>
-            <Pressable onPress={onClose} hitSlop={10}>
-              <Ionicons name="close" size={24} color={C.textMuted} />
-            </Pressable>
-          </View>
+    <Modal visible={visible} animationType="slide" onRequestClose={() => (page === "main" ? onClose() : setPage("main"))}>
+      <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+        <View style={styles.setHeader}>
+          <Pressable style={styles.setBack} onPress={() => (page === "main" ? onClose() : setPage("main"))} hitSlop={10}>
+            <Ionicons name="chevron-back" size={24} color={C.text} />
+          </Pressable>
+          <Text style={styles.setHeaderTitle}>{titles[page]}</Text>
+          <View style={{ width: 44 }} />
+        </View>
 
-          <ScrollView showsVerticalScrollIndicator={false}>
-          <Text style={styles.sectionLabel}>Appearance</Text>
-          <View style={styles.themeOptionRow}>
-            {options.map((opt) => {
-              const active = themeMode === opt.key;
-              return (
-                <Pressable
-                  key={opt.key}
-                  style={[styles.themeOption, active && styles.themeOptionActive]}
-                  onPress={() => onChangeTheme(opt.key)}
-                >
-                  <Ionicons name={opt.icon} size={20} color={active ? C.accent : C.textMuted} />
-                  <Text style={[styles.themeOptionText, active && styles.themeOptionTextActive]}>{opt.label}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
-
-          {Platform.OS === "web" && (
+        <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+          {page === "main" && (
             <>
-              <Text style={[styles.sectionLabel, { marginTop: 22 }]}>Notifications</Text>
-              <NotificationSettingsRow authedApi={authedApi} colors={C} />
+              <View style={styles.setSearch}>
+                <Ionicons name="search" size={20} color={C.textMuted} />
+                <TextInput style={styles.setSearchInput} value={q} onChangeText={setQ} placeholder="Search" placeholderTextColor={C.textMuted} autoCapitalize="none" autoCorrect={false} />
+                {!!q && <Pressable onPress={() => setQ("")} hitSlop={8}><Ionicons name="close-circle" size={18} color={C.textMuted} /></Pressable>}
+              </View>
+              {shownSections.map((sec, i) => (
+                <View key={sec.title}>
+                  {i > 0 && <View style={styles.setBand} />}
+                  <Text style={styles.setSectionTitle}>{sec.title}</Text>
+                  {sec.rows.map((row) => <Row key={row.key} row={row} />)}
+                </View>
+              ))}
+              {shownSections.length === 0 && <Text style={[styles.empty, { marginTop: 40 }]}>No results for "{q}".</Text>}
             </>
           )}
 
-          <Text style={[styles.sectionLabel, { marginTop: 22 }]}>Accounts</Text>
-          {accounts.map((a) => {
-            const active = a.user.id === currentId;
-            return (
-              <Pressable key={a.user.id} style={[styles.accountRow, active && styles.accountRowActive]} onPress={() => { if (!active && onSwitch) onSwitch(a); }}>
-                <UserAvatar name={a.user.name} avatarUrl={a.user.avatarUrl} size={38} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.accountName} numberOfLines={1}>{a.user.name}</Text>
-                  <Text style={styles.roomInfo} numberOfLines={1}>@{a.user.username}</Text>
-                </View>
-                {active ? <Ionicons name="checkmark-circle" size={22} color={C.accent} /> : <Text style={styles.headerAction}>Switch</Text>}
-              </Pressable>
-            );
-          })}
-          <Pressable style={styles.accountRow} onPress={onAddAccount}>
-            <View style={[styles.avatarSm, { alignItems: "center", justifyContent: "center", backgroundColor: C.surfaceRaised }]}>
-              <Ionicons name="add" size={22} color={C.accent} />
+          {page === "accounts" && (
+            <View style={{ paddingTop: 8 }}>
+              {accounts.map((a) => {
+                const active = a.user.id === currentId;
+                return (
+                  <Pressable key={a.user.id} style={styles.setRow} onPress={() => { if (!active && onSwitch) onSwitch(a); }}>
+                    <UserAvatar name={a.user.name} avatarUrl={a.user.avatarUrl} size={42} style={{ marginRight: 12 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.setRowTitle} numberOfLines={1}>{a.user.name}</Text>
+                      <Text style={styles.setRowSub} numberOfLines={1}>@{a.user.username}</Text>
+                    </View>
+                    {active ? <Ionicons name="checkmark-circle" size={24} color={C.accent} /> : <Text style={styles.headerAction}>Switch</Text>}
+                  </Pressable>
+                );
+              })}
+              <Row row={{ key: "add2", icon: "add-circle-outline", title: "Add account", onPress: () => { onClose(); onAddAccount && onAddAccount(); } }} />
             </View>
-            <Text style={[styles.accountName, { flex: 1 }]}>Add account</Text>
-          </Pressable>
-          <Pressable style={styles.logoutRow} onPress={onLogout}>
-            <Text style={styles.logoutText}>{currentUsername ? `Log out of @${currentUsername}` : "Log out"}</Text>
-          </Pressable>
-          </ScrollView>
-        </View>
-      </View>
+          )}
+
+          {page === "appearance" && (
+            <View style={{ paddingTop: 8 }}>
+              {themeOptions.map((opt) => {
+                const active = themeMode === opt.key;
+                return (
+                  <Pressable key={opt.key} style={styles.setRow} onPress={() => onChangeTheme(opt.key)}>
+                    <Ionicons name={opt.icon} size={26} color={C.text} style={{ width: 34 }} />
+                    <Text style={[styles.setRowTitle, { flex: 1 }]}>{opt.label}</Text>
+                    <Ionicons name={active ? "radio-button-on" : "radio-button-off"} size={24} color={active ? C.accent : C.textMuted} />
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
+
+          {page === "notifications" && Platform.OS === "web" && (
+            <View style={{ padding: 16 }}>
+              <NotificationSettingsRow authedApi={authedApi} colors={C} />
+            </View>
+          )}
+          <View style={{ height: 30 }} />
+        </ScrollView>
+      </SafeAreaView>
     </Modal>
   );
 }
@@ -4202,6 +4485,7 @@ function AvatarCropModal({ asset, onCancel, onDone }) {
 }
 
 function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAccount, onAddAccount, onUpdateMe, themeMode, onChangeTheme }) {
+  const chrome = useContext(ScrollChromeContext);
   const [posts, setPosts] = useState([]);
   const [loadingPosts, setLoadingPosts] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -4283,7 +4567,9 @@ function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAcc
       </View>
 
       <FlatList
-        contentContainerStyle={{ paddingBottom: 24 }}
+        contentContainerStyle={{ paddingBottom: 24 + TAB_SPACE }}
+        onScroll={chrome.onScroll}
+        scrollEventThrottle={16}
         data={posts}
         keyExtractor={(item) => item.id}
         extraData={activePost.activeId}
@@ -4358,6 +4644,7 @@ function ProfileTab({ me, token, authedApi, onLogout, accounts = [], onSwitchAcc
         currentUsername={me?.username}
         onSwitch={(a) => { setSettingsOpen(false); onSwitchAccount && onSwitchAccount(a); }}
         onAddAccount={() => { setSettingsOpen(false); onAddAccount && onAddAccount(); }}
+        onEditBio={() => setBioModalOpen(true)}
         authedApi={authedApi}
       />
       <EditBioModal
@@ -4723,19 +5010,51 @@ function buildStyles(C) {
   },
   smallButtonMuted: { backgroundColor: C.surfaceRaised },
   smallButtonMutedText: { color: C.textMuted },
-  tabBar: {
+  setHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10 },
+  setBack: { width: 44, height: 44, borderRadius: 22, backgroundColor: C.surfaceRaised, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: C.border },
+  setHeaderTitle: { color: C.text, fontSize: 17, fontWeight: "800" },
+  setSearch: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.surfaceRaised, borderRadius: 14, marginHorizontal: 14, marginTop: 6, marginBottom: 14, paddingHorizontal: 14, height: 48 },
+  setSearchInput: { flex: 1, color: C.text, fontSize: 17, paddingVertical: 0 },
+  setBand: { height: 8, backgroundColor: C.surfaceRaised, marginTop: 10 },
+  setSectionTitle: { color: C.textMuted, fontSize: 14, fontWeight: "600", paddingHorizontal: 18, paddingTop: 14, paddingBottom: 6 },
+  setRow: { flexDirection: "row", alignItems: "center", paddingVertical: 13, paddingHorizontal: 18 },
+  setRowTitle: { color: C.text, fontSize: 17, fontWeight: "500" },
+  setRowSub: { color: C.textMuted, fontSize: 14, marginTop: 2, lineHeight: 19 },
+  setRowValue: { color: C.textMuted, fontSize: 16, marginRight: 6, maxWidth: 140 },
+  mentionHeader: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  igMention: { color: C.accent, fontSize: 14, marginTop: 4 },
+  storyTagWrap: { position: "absolute", left: 16, right: 16, bottom: 70, gap: 10, alignItems: "flex-start" },
+  storyTagText: { color: "#fff", fontWeight: "700", fontSize: 14, backgroundColor: "rgba(0,0,0,0.45)", paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12, overflow: "hidden" },
+  storyAddBtn: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "rgba(255,255,255,0.22)", borderWidth: 1, borderColor: "rgba(255,255,255,0.5)", borderRadius: 22, paddingVertical: 10, paddingHorizontal: 16 },
+  storyAddText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  notifActions: { flexDirection: "row", gap: 8, marginTop: 10 },
+  notifBtn: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 10, backgroundColor: C.surfaceRaised, borderWidth: 1, borderColor: C.border },
+  notifBtnPrimary: { backgroundColor: C.accent, borderColor: C.accent },
+  notifBtnText: { color: C.text, fontWeight: "700", fontSize: 14 },
+  notifBtnPrimaryText: { color: C.white, fontWeight: "700", fontSize: 14 },
+  notifDone: { color: C.accent, fontWeight: "700", fontSize: 13, marginTop: 8 },
+  tabPillWrap: { position: "absolute", left: 0, right: 0, alignItems: "center" },
+  tabPill: {
     flexDirection: "row",
-    borderTopWidth: 1,
-    borderTopColor: C.border,
-    backgroundColor: C.bg,
-    paddingTop: 8,
-    paddingBottom: Platform.OS === "ios" ? 22 : Platform.OS === "web" ? "max(12px, env(safe-area-inset-bottom))" : 10,
+    alignItems: "center",
+    gap: 4,
+    padding: 6,
+    borderRadius: 34,
+    backgroundColor: C.surfaceRaised,
+    borderWidth: 1,
+    borderColor: C.borderStrong,
+    width: "88%",
+    maxWidth: 420,
+    shadowColor: "#000",
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
   },
-  tabItem: { flex: 1, alignItems: "center", gap: 2 },
-  tabIcon: { fontSize: 22, opacity: 0.45 },
-  tabIconActive: { opacity: 1 },
-  tabLabel: { color: C.textMuted, fontSize: 11, fontWeight: "700" },
-  tabLabelActive: { color: C.accent },
+  tabPillItem: { flex: 1, alignItems: "center", justifyContent: "center", height: 46, borderRadius: 26 },
+  tabPillItemActive: { backgroundColor: C.accentSoft },
+  tabHandleWrap: { position: "absolute", left: 0, right: 0, alignItems: "center" },
+  tabHandle: { width: 44, height: 5, borderRadius: 3, backgroundColor: C.textFaint },
   tabBadge: {
     position: "absolute",
     top: -2,
